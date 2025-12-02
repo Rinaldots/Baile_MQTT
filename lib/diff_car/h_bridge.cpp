@@ -1,12 +1,20 @@
 // Include DiffCar class definition
 #include "diff_car.h"  
 #include <cmath>
-
+#include <QuickPID.h>
 constexpr float PID_DT_S = 1.0f / 100.0f; // handler_motor roda ~100 Hz
-AdaptivePID left_pid(PID_DT_S, -255.0f, 255.0f,
-                     &diffCar.left_velocity_target, &diffCar.left_velocity_ms, &diffCar.left_pid_output);
-AdaptivePID right_pid(PID_DT_S, -255.0f, 255.0f,
-                      &diffCar.right_velocity_target, &diffCar.right_velocity_ms, &diffCar.right_pid_output);
+float Kp_p = 2, Ki_p = 1, Kd_p = 0.1;
+
+QuickPID left_pid(&diffCar.left_velocity_ms, &diffCar.left_pid_output, &diffCar.abs_left_velocity_target, Kp_p, Ki_p, Kd_p,  /* OPTIONS */
+               left_pid.pMode::pOnError,                   /* pOnError, pOnMeas, pOnErrorMeas */
+               left_pid.dMode::dOnMeas,                    /* dOnError, dOnMeas */
+               left_pid.iAwMode::iAwCondition,             /* iAwCondition, iAwClamp, iAwOff */
+               left_pid.Action::direct);  
+QuickPID right_pid(&diffCar.left_velocity_ms, &diffCar.right_pid_output, &diffCar.abs_right_velocity_target, Kp_p, Ki_p, Kd_p,  /* OPTIONS */
+               right_pid.pMode::pOnError,                   /* pOnError, pOnMeas, pOnErrorMeas */
+               right_pid.dMode::dOnMeas,                    /* dOnError, dOnMeas */
+               right_pid.iAwMode::iAwCondition,             /* iAwCondition, iAwClamp, iAwOff */
+               right_pid.Action::direct);
 
 void DiffCar::setup_h_bridge(){
    
@@ -24,6 +32,16 @@ void DiffCar::setup_h_bridge(){
     ledcAttachPin(MOTOR_IN3, 2);
     ledcSetup(3, 30000, 8);
     ledcAttachPin(MOTOR_IN4, 3);
+
+    //turn the PID on
+    left_pid.SetMode(left_pid.Control::automatic);
+    left_pid.SetOutputLimits(-1, 1);
+    left_pid.SetSampleTimeUs(2000);
+        
+    right_pid.SetMode(right_pid.Control::automatic);
+    right_pid.SetOutputLimits(-1, 1);
+    right_pid.SetSampleTimeUs(2000);
+ 
 }
 
 void DiffCar::set_motor_speed(float left_motor_pwm_in, float right_motor_pwm_in){ 
@@ -120,13 +138,13 @@ void DiffCar::update_h_bridge(){
     }
 
     if(right_motor_pwm != 0){
-        if (left_motor_dir) {
-            ledcWrite(3, left_motor_pwm);
+        if (right_motor_dir) {
+            ledcWrite(3, right_motor_pwm);
             ledcWrite(2, 0);
             
         } else {
             ledcWrite(3, 0);
-            ledcWrite(2, left_motor_pwm);
+            ledcWrite(2, right_motor_pwm);
         }
     } else {
         ledcWrite(2, 0);
@@ -135,26 +153,47 @@ void DiffCar::update_h_bridge(){
 }
 
 void DiffCar::handler_motor(){
-    MotorPwmResult temp_pwm = set_motor_speed_msr(this->left_velocity_target, this->right_velocity_target);
+    abs_left_velocity_target = fabs(left_velocity_target);
+    abs_right_velocity_target = fabs(right_velocity_target);
+
+    float vel_left = this->left_velocity_target*(1+this->left_pid_output);
+    float vel_right = this->right_velocity_target*(1+this->right_pid_output);
+
+    MotorPwmResult temp_pwm = set_motor_speed_msr(vel_left, vel_right);
+
     float temp_pwm_left  =  temp_pwm.left;
+
     float temp_pwm_right = temp_pwm.right;
+
     if (left_velocity_target != 0.0f){
-      left_pid.compute();  
+      left_pid.Compute();  
     }else{
-      left_pid.reset();
+      left_pid.Reset();
+      left_pid_output = 0.0f;
+      temp_pwm_left = 0.0f;
     }
     
-    if (left_velocity_target != 0.0f){
-        right_pid.compute();
+    if (right_velocity_target != 0.0f){
+        right_pid.Compute();
     }else{
-        right_pid.reset();
+        right_pid.Reset();
+        right_pid_output = 0.0f;
+        temp_pwm_right = 0.0f;
     }
 
-    float corrected_left_pwm = temp_pwm_left + left_pid_output;
-    float corrected_right_pwm = temp_pwm_right + right_pid_output;
+    if(left_velocity_target < 0){
+        left_motor_dir = 0;
+    }else{
+        left_motor_dir = 1;
+    }
 
-    // Define o PWM de ambos os motores corretamente
-    set_motor_speed(corrected_left_pwm, corrected_right_pwm);
+    if(right_velocity_target < 0){
+        right_motor_dir = 0;
+    }else{
+        right_motor_dir = 1;
+    }
+
+    set_motor_speed(temp_pwm_left, temp_pwm_right);
 
     update_h_bridge();
 }
