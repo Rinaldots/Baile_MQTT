@@ -5,10 +5,6 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "MPU6050_6Axis_MotionApps20.h"
-#include <QuickPID.h>
-
-extern QuickPID left_pid;
-extern QuickPID right_pid;
 // geometry_msgs from ROS2
 
 // geometry_msgs from ROS2
