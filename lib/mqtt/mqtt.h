@@ -27,6 +27,9 @@ class MqttTask {
     void para();
     void movF(int tempoMov);
     void movT(int tempoMov);
+    void movF_Reto(int tempoMov);
+    void movT_Reto(int tempoMov);
+    void MovDistancia(float metros, float velocidade_linear);
     void coreo();
     void rotD_F(int tempoMov);
     void rotE_F(int tempoMov);

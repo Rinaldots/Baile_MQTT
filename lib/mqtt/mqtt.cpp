@@ -76,9 +76,13 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
         coreo();
       } else if (mensagem[4] == 'M' && mensagem[5] == 'F') {
         Serial.println("Movendo para frente!");
-        movF(1);
+        movF_Reto(100);
       } else if (mensagem[4] == 'M' && mensagem[5] == 'T') {
-        movT(1);
+        movT_Reto(100);
+      } else if (mensagem[4] == 'M' && mensagem[5] == 'D') {
+        MovDistancia(100, 0.3f);
+      } else if (mensagem[4] == 'M' && mensagem[5] == 'E') {
+        MovDistancia(-100, 0.3f);
       } else if (mensagem[4] == 'G' && mensagem[5] == 'D') {
         girD(1);
       } else if (mensagem[4] == 'G' && mensagem[5] == 'E') {
@@ -91,7 +95,16 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
         if (mensagem[6] == '-'){
           dist = -dist;
         }
-        diffCar.navegar_reto(dist);
+        diffCar.mover_distancia(dist, 0.4f);
+      } else if (mensagem[4] == 'G' && mensagem[5] == 'O') {
+        int idx1 = mensagem.indexOf(':', 7);
+        int idx2 = mensagem.indexOf(':', idx1 + 1);
+        if (idx1 > 0 && idx2 > 0) {
+           diffCar.target_x = mensagem.substring(7, idx1).toFloat();
+           diffCar.target_y = mensagem.substring(idx1 + 1, idx2).toFloat();
+           diffCar.target_theta = mensagem.substring(idx2 + 1).toFloat();
+           diffCar.mode = 1; 
+        }
       } else {
         Serial.print("Unknown DNX command: ");
         Serial.println(mensagem.substring(4));
@@ -162,6 +175,18 @@ void MqttTask::updateTelemetry() {
   String telemetry = "{";
   telemetry += "\"left_velocity_ms\":" + String(diffCar.left_velocity_ms) + ",";
   telemetry += "\"right_velocity_ms\":" + String(diffCar.right_velocity_ms) + ",";
+  telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
+  telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
+  telemetry += "\"x\":" + String(diffCar.odom_real.x) + ",";
+  telemetry += "\"y\":" + String(diffCar.odom_real.y) + ",";
+  telemetry += "\"theta\":" + String(diffCar.odom_real.theta) + ",";
+  telemetry += "\"accel_x\":" + String(diffCar.accel_d[0]) + ",";
+  telemetry += "\"accel_y\":" + String(diffCar.accel_d[1]) + ",";
+  telemetry += "\"accel_z\":" + String(diffCar.accel_d[2]) + ",";
+  telemetry += "\"gyro_x\":" + String(diffCar.gyro_d[0]) + ",";
+  telemetry += "\"gyro_y\":" + String(diffCar.gyro_d[1]) + ",";
+  telemetry += "\"gyro_z\":" + String(diffCar.gyro_d[2]) + ",";
+  telemetry += "\"yaw_imu\":" + String(diffCar.ypr_d[0]);
   telemetry += "}";
   publish("telemetry", telemetry.c_str());
 }

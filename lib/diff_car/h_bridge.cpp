@@ -1,20 +1,10 @@
 // Include DiffCar class definition
 #include "diff_car.h"  
 #include <cmath>
-#include <QuickPID.h>
-constexpr float PID_DT_S = 1.0f / 100.0f; // handler_motor roda ~100 Hz
-float Kp_p = 2, Ki_p = 1, Kd_p = 0.1;
+#include "FuzzyControl.h"
 
-QuickPID left_pid(&diffCar.left_velocity_ms, &diffCar.left_pid_output, &diffCar.abs_left_velocity_target, Kp_p, Ki_p, Kd_p,  /* OPTIONS */
-               left_pid.pMode::pOnError,                   /* pOnError, pOnMeas, pOnErrorMeas */
-               left_pid.dMode::dOnMeas,                    /* dOnError, dOnMeas */
-               left_pid.iAwMode::iAwCondition,             /* iAwCondition, iAwClamp, iAwOff */
-               left_pid.Action::direct);  
-QuickPID right_pid(&diffCar.left_velocity_ms, &diffCar.right_pid_output, &diffCar.abs_right_velocity_target, Kp_p, Ki_p, Kd_p,  /* OPTIONS */
-               right_pid.pMode::pOnError,                   /* pOnError, pOnMeas, pOnErrorMeas */
-               right_pid.dMode::dOnMeas,                    /* dOnError, dOnMeas */
-               right_pid.iAwMode::iAwCondition,             /* iAwCondition, iAwClamp, iAwOff */
-               right_pid.Action::direct);
+FuzzyController left_fuzzy(-1.0, 1.0, &diffCar.abs_left_velocity_target, &diffCar.left_velocity_ms, &diffCar.left_pid_output);
+FuzzyController right_fuzzy(-1.0, 1.0, &diffCar.abs_right_velocity_target, &diffCar.right_velocity_ms, &diffCar.right_pid_output);
 
 void DiffCar::setup_h_bridge(){
    
@@ -33,20 +23,102 @@ void DiffCar::setup_h_bridge(){
     ledcSetup(3, 30000, 8);
     ledcAttachPin(MOTOR_IN4, 3);
 
-    //turn the PID on
-    left_pid.SetMode(left_pid.Control::automatic);
-    left_pid.SetOutputLimits(-1, 1);
-    left_pid.SetSampleTimeUs(2000);
+    Preferences preferences;
+    preferences.begin("motor_calib", false);
+    min_pwm_left = preferences.getFloat("min_pwml", 0.0f);
+    min_pwm_right = preferences.getFloat("min_pwmr", 0.0f);
+    preferences.end();
+    
+    // Se a inercia nao foi calibrada, chama a calibracao auto
+    if (min_pwm_left == 0.0f || min_pwm_right == 0.0f) {
+        calibrate_motors_inertia();
+    } else {
+        Serial.printf("Valores PWM de Inercia carregados: L=%.1f R=%.1f\n", min_pwm_left, min_pwm_right);
+    }
+}
+
+void DiffCar::calibrate_motors_inertia() {
+    Serial.println("==============================================");
+    Serial.println(" Iniciando Mapeamento Automatico de Inercia ");
+    Serial.println(" (Motor girara devagar para encontrar o limite) ");
+    Serial.println("==============================================");
+    
+    left_motor_dir = 1;
+    right_motor_dir = 1;
+    
+    // Mapeamento Motor Esquerdo
+    float test_pwm = 0.0f;
+    min_pwm_left = 255.0f; // Default alto
+    while(test_pwm <= 255.0f) {
+        left_motor_pwm = test_pwm;
+        right_motor_pwm = 0;
+        update_h_bridge();
+        delay(50); 
+        velocity_update(); 
         
-    right_pid.SetMode(right_pid.Control::automatic);
-    right_pid.SetOutputLimits(-1, 1);
-    right_pid.SetSampleTimeUs(2000);
- 
+        if (fabs(left_velocity_ms) > 0.01f) {
+            min_pwm_left = test_pwm + 2.0f; // Margem de seguranca
+            Serial.printf("Motor Esquerdo se moveu com PWM: %.1f\n", test_pwm);
+            break;
+        }
+        test_pwm += 1.0f;
+    }
+    
+    // Para esquerda
+    left_motor_pwm = 0;
+    update_h_bridge();
+    delay(1000); 
+
+    // Mapeamento Motor Direito
+    test_pwm = 0.0f;
+    min_pwm_right = 255.0f;
+    while(test_pwm <= 255.0f) {
+        left_motor_pwm = 0;
+        right_motor_pwm = test_pwm;
+        update_h_bridge();
+        delay(50);
+        velocity_update();
+        
+        if (fabs(right_velocity_ms) > 0.01f) {
+            min_pwm_right = test_pwm + 2.0f; // Margem de seguranca
+            Serial.printf("Motor Direito se moveu com PWM: %.1f\n", test_pwm);
+            break;
+        }
+        test_pwm += 1.0f;
+    }
+    
+    // Para direita
+    right_motor_pwm = 0;
+    update_h_bridge();
+
+    // Salvar na NVS (EEPROM Emulada do ESP32)
+    Preferences preferences;
+    preferences.begin("motor_calib", false);
+    preferences.putFloat("min_pwml", min_pwm_left);
+    preferences.putFloat("min_pwmr", min_pwm_right);
+    preferences.end();
+    
+    Serial.printf("Calibracao Finalizada com Sucesso L: %.1f, R: %.1f\n", min_pwm_left, min_pwm_right);
 }
 
 void DiffCar::set_motor_speed(float left_motor_pwm_in, float right_motor_pwm_in){ 
-    left_motor_pwm = constrain(fabs(left_motor_pwm_in), 0.0f, 255.0f);
-    right_motor_pwm = constrain(fabs(right_motor_pwm_in), 0.0f, 255.0f);
+    float left_in = fabs(left_motor_pwm_in);
+    if (left_in > 0.01f) {
+        // Mapeia gradualmente a entrada para a zona util
+        left_motor_pwm = min_pwm_left + (left_in / 255.0f) * (255.0f - min_pwm_left);
+        left_motor_pwm = constrain(left_motor_pwm, 0.0f, 255.0f);
+    } else {
+        left_motor_pwm = 0.0f;
+    }
+
+    float right_in = fabs(right_motor_pwm_in);
+    if (right_in > 0.01f) {
+        // Mapeia gradualmente a entrada para a zona util
+        right_motor_pwm = min_pwm_right + (right_in / 255.0f) * (255.0f - min_pwm_right);
+        right_motor_pwm = constrain(right_motor_pwm, 0.0f, 255.0f);
+    } else {
+        right_motor_pwm = 0.0f;
+    }
 }
 
 static inline double model_velocity_from_pwm(double p){
@@ -58,7 +130,7 @@ static double pwm_from_velocity(double vel) {
     if (!std::isfinite(vel) || vel <= 0.0) return 0.0;
     const double vel_max = model_velocity_from_pwm(255.0);
     if (vel >= vel_max) return 255.0;
-    const double MIN_EFFECTIVE_VEL = 0.10; 
+    const double MIN_EFFECTIVE_VEL = 0.02; // Permite velocidades radiais baixas sem retornar 0.0
     if (vel < MIN_EFFECTIVE_VEL) return 0.0;
     const double a = C1;
     const double b = C2;
@@ -113,6 +185,11 @@ MotorPwmResult DiffCar::set_motor_speed_msr(float vel_left, float vel_right){
     if (!std::isfinite(p_left)) p_left = 0; if (!std::isfinite(p_right)) p_right = 0;
     if (p_left < 0) p_left = 0; else if (p_left > 255) p_left = 255;
     if (p_right < 0) p_right = 0; else if (p_right > 255) p_right = 255;
+
+    // Sincronização do Modelo de PWM preditivo à Inércia (Min PWM) já calibrada
+    if (p_left > 0.01) p_left = min_pwm_left + (p_left / 255.0) * (255.0 - min_pwm_left);
+    if (p_right > 0.01) p_right = min_pwm_right + (p_right / 255.0) * (255.0 - min_pwm_right);
+
     left_motor_pwm = (int)lround(p_left);
     right_motor_pwm = (int)lround(p_right);
     left_motor_dir = vel_left >= 0 ? 1 : 0;
@@ -152,48 +229,80 @@ void DiffCar::update_h_bridge(){
     }
 }
 
-void DiffCar::handler_motor(){
+void DiffCar::handler_motor() {
     abs_left_velocity_target = fabs(left_velocity_target);
     abs_right_velocity_target = fabs(right_velocity_target);
 
-    float vel_left = this->left_velocity_target*(1+this->left_pid_output);
-    float vel_right = this->right_velocity_target*(1+this->right_pid_output);
-
-    MotorPwmResult temp_pwm = set_motor_speed_msr(vel_left, vel_right);
-
-    float temp_pwm_left  =  temp_pwm.left;
-
-    float temp_pwm_right = temp_pwm.right;
-
-    if (left_velocity_target != 0.0f){
-      left_pid.Compute();  
-    }else{
-      left_pid.Reset();
-      left_pid_output = 0.0f;
-      temp_pwm_left = 0.0f;
+    // 1. O Fuzzy deve calcular baseado no erro atual ANTES de aplicar
+    if (left_velocity_target != 0.0f) {
+        left_fuzzy.compute();  
+    } else {
+        left_fuzzy.reset();
+        left_pid_output = 0.0f;
     }
     
-    if (right_velocity_target != 0.0f){
-        right_pid.Compute();
-    }else{
-        right_pid.Reset();
+    if (right_velocity_target != 0.0f) {
+        right_fuzzy.compute();
+    } else {
+        right_fuzzy.reset();
         right_pid_output = 0.0f;
-        temp_pwm_right = 0.0f;
     }
 
-    if(left_velocity_target < 0){
-        left_motor_dir = 0;
-    }else{
-        left_motor_dir = 1;
+    // 2. Aplica o fator de correção
+    float raw_vel_left = this->left_velocity_target * (1 + this->left_pid_output);
+    float raw_vel_right = this->right_velocity_target * (1 + this->right_pid_output);
+
+    // =========================================================================
+    // TCS (Traction Control System) com Slew Rate e telemetria da IMU
+    // =========================================================================
+    static float safe_vel_left = 0.0f;
+    static float safe_vel_right = 0.0f;
+    static float prev_enc_vel_l = 0.0f;
+    static float prev_enc_vel_r = 0.0f;
+    static float whl_accel_l = 0.0f;
+    static float whl_accel_r = 0.0f;
+
+    // Aceleração rotacional atual da roda (dv/dt), handler roda a aprox 10ms (0.01s)
+    float raw_whl_accel_l = fabs(left_velocity_ms - prev_enc_vel_l) / 0.01f;
+    float raw_whl_accel_r = fabs(right_velocity_ms - prev_enc_vel_r) / 0.01f;
+    
+    // Low-pass filter (Hysteresis) para evitar acionamentos falsos por frames de ruído
+    whl_accel_l = 0.2f * raw_whl_accel_l + 0.8f * whl_accel_l;
+    whl_accel_r = 0.2f * raw_whl_accel_r + 0.8f * whl_accel_r;
+
+    prev_enc_vel_l = left_velocity_ms;
+    prev_enc_vel_r = right_velocity_ms;
+
+    // Aceleração linear real do chassi sentida pela IMU (módulo no plano X-Y em m/s^2)
+    float imu_accel_xy = sqrt(pow(accel_d[0], 2) + pow(accel_d[1], 2)) * 9.81f;
+
+    float max_accel_step = 0.04f; // Aceleração agressiva por padrão
+
+    // Se a roda sofreu uma forte aceleração angular (> 5.0 m/s^2) 
+    // mas a IMU diz que o chassi físico mal andou (< 0.8 m/s^2)...
+    // A roda perdeu tração (Slip). Ativamos a intervenção!
+    if ((whl_accel_l > 5.0f || whl_accel_r > 5.0f) && imu_accel_xy < 0.8f) {
+        max_accel_step = 0.005f; // Corta o "gás" drasticamente pra roda grudar de novo
     }
 
-    if(right_velocity_target < 0){
-        right_motor_dir = 0;
-    }else{
-        right_motor_dir = 1;
-    }
+    // Rampa suave para motor esquerdo
+    if (raw_vel_left > safe_vel_left + max_accel_step) safe_vel_left += max_accel_step;
+    else if (raw_vel_left < safe_vel_left - max_accel_step) safe_vel_left -= max_accel_step;
+    else safe_vel_left = raw_vel_left;
 
-    set_motor_speed(temp_pwm_left, temp_pwm_right);
+    // Rampa suave para motor direito
+    if (raw_vel_right > safe_vel_right + max_accel_step) safe_vel_right += max_accel_step;
+    else if (raw_vel_right < safe_vel_right - max_accel_step) safe_vel_right -= max_accel_step;
+    else safe_vel_right = raw_vel_right;
 
+    // Corta sinal fantasma quando motor deve realmente parar
+    if (left_velocity_target == 0.0f && fabs(safe_vel_left) < 0.05f) safe_vel_left = 0.0f;
+    if (right_velocity_target == 0.0f && fabs(safe_vel_right) < 0.05f) safe_vel_right = 0.0f;
+
+    // 3. Converte a velocidade final desejada em PWM usando apenas o modelo preditivo
+    // (Garante que set_motor_speed_msr seja quem dita o PWM e a direção internos)
+    set_motor_speed_msr(safe_vel_left, safe_vel_right); 
+
+    // 4. Atualiza a Ponte H diretamente
     update_h_bridge();
 }

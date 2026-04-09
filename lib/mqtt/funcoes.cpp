@@ -1,6 +1,13 @@
 #include "diff_car.h"
 #include "mqtt.h"
-#define COMUM_SPEED 0.4f
+#define COMUM_SPEED 0.2f
+
+static double wrapAngleD(double a) {
+  while (a > M_PI) a -= 2.0 * M_PI;
+  while (a <= -M_PI) a += 2.0 * M_PI;
+  return a;
+}
+
 
 void MqttTask::girE(int tempoGiro){
   diffCar.left_velocity_target = -COMUM_SPEED;
@@ -18,16 +25,74 @@ void MqttTask::para(){
   diffCar.right_velocity_target = 0.0f;
 }
 
+
+
+void MqttTask::movF_Reto(int tempoMov) {
+    static float angulo_inicial = 0.0f;
+    static unsigned long ultimo_tempo = 0;
+
+    // Só captura um novo ângulo se faz mais de 50ms que esse comando não é chamado (mudou de comando)
+    if (millis() - ultimo_tempo > 50) {
+        angulo_inicial = diffCar.ypr_d[0]; // Captura o rumo atual
+    }
+    
+    unsigned long start = millis();
+    
+    while(millis() - start < tempoMov) {
+        // Calcula erro baseado no IMU
+        float erro = wrapAngleD(angulo_inicial - diffCar.ypr_d[0]);
+        float Kp = 1.2f; // Ganho de correção
+        
+        diffCar.left_velocity_target = COMUM_SPEED - (erro * Kp);
+        diffCar.right_velocity_target = COMUM_SPEED + (erro * Kp);
+        
+        delay(10); // Pequena pausa para o loop de controle
+        ultimo_tempo = millis(); // Mantém o tempo atualizado enquanto rodar
+    }
+    ultimo_tempo = millis();
+}
+
+void MqttTask::movT_Reto(int tempoMov) {
+    static float angulo_inicial = 0.0f;
+    static unsigned long ultimo_tempo = 0;
+
+    // Só captura um novo ângulo se faz mais de 50ms que esse comando não é chamado (mudou de comando)
+    if (millis() - ultimo_tempo > 50) {
+        angulo_inicial = diffCar.ypr_d[0]; // Captura o rumo atual
+    }
+    
+    unsigned long start = millis();
+    
+    while(millis() - start < tempoMov) {
+        // Calcula erro baseado no IMU
+        float erro = wrapAngleD(angulo_inicial - diffCar.ypr_d[0]);
+        float Kp = 1.2f; // Ganho de correção
+        
+        diffCar.left_velocity_target = -(COMUM_SPEED - (erro * Kp));
+        diffCar.right_velocity_target = -(COMUM_SPEED + (erro * Kp));
+        
+        delay(10); // Pequena pausa para o loop de controle
+        ultimo_tempo = millis(); // Mantém o tempo atualizado enquanto rodar
+    }
+    ultimo_tempo = millis();
+}
+
+void MqttTask::MovDistancia(float metros, float velocidade_linear) {
+    diffCar.mover_distancia(metros, velocidade_linear);
+}
+
 void MqttTask::movF(int tempoMov){
   diffCar.mode = 0;
   diffCar.left_velocity_target = COMUM_SPEED;
   diffCar.right_velocity_target = COMUM_SPEED;
+  if(tempoMov > 0) delay(tempoMov); // Espera o movimento acontecer
 }
 
 void MqttTask::movT(int tempoMov){
   diffCar.mode = 0;
   diffCar.left_velocity_target = -COMUM_SPEED;
   diffCar.right_velocity_target = -COMUM_SPEED;
+  if(tempoMov > 0) delay(tempoMov);
 }
 
 void MqttTask::rotD_F(int tempoMov) {

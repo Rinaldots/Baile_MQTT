@@ -5,7 +5,6 @@
 MPU6050 mpu;
 
 bool DMPReady = false;  // Set true if DMP init was successful
-uint8_t MPUIntStatus;   // Holds actual interrupt status byte from MPU
 uint8_t devStatus;      // Return status after each device operation (0 = success, !0 = error)
 uint16_t packetSize;    // Expected DMP packet size (default is 42 bytes)
 uint8_t FIFOBuffer[64]; // FIFO storage buffer
@@ -14,12 +13,8 @@ Quaternion q;           // [w, x, y, z]         Quaternion container
 VectorFloat gravity;    // [x, y, z]            Gravity vector
 float ypr[3];           // [yaw, pitch, roll]   Yaw/Pitch/Roll container and
 VectorInt16 gyro;       // [x, y, z]            Gyroscope measurements
-uint8_t teapotPacket[14] = { '$', 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, '\r', '\n' };
 VectorInt16 aa;        // Accel raw
-volatile bool MPUInterrupt = false;     // Indicates whether MPU6050 interrupt pin has gone high
-void DMPDataReady() {
-  MPUInterrupt = true;
-}
+VectorInt16 aaWorld;   // Accel in World frame (gravity removed and rotated)
 
 void DiffCar::setup_mpu() {
     Wire.begin();
@@ -58,40 +53,37 @@ void DiffCar::setup_mpu() {
 void DiffCar::mpu_update() {
     if (!DMPReady) return;
 
-    uint16_t fifoCount = mpu.getFIFOCount();
+    // Use dmpGetCurrentFIFOPacket() to get the latest packet directly.
+    // It's overflow proof and guarantees aligned bytes (prevents huge garbage spikes)
+    if (mpu.dmpGetCurrentFIFOPacket(FIFOBuffer)) {
+        mpu.dmpGetQuaternion(&q, FIFOBuffer);
 
-    // Se FIFO estourar → reset
-    if (fifoCount == 1024) {
-        mpu.resetFIFO();
-        return;
+        // --- QUATERNION ---
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+
+        mpu.dmpGetGravity(&gravity, &q);
+        
+        mpu.dmpGetAccel(&aa, FIFOBuffer);
+        
+        mpu.dmpGetLinearAccel(&accel, &aa, &gravity);
+        
+        // Transforma a aceleração linear (sem gravidade) para a referência do mundo (norte/sul/vertical absoluto)
+        // Implementação manual da rotação do Quaternion
+        aaWorld.x = (accel.x * (1 - 2*q.y*q.y - 2*q.z*q.z)) + (accel.y * (2*q.x*q.y - 2*q.w*q.z)) + (accel.z * (2*q.x*q.z + 2*q.w*q.y));
+        aaWorld.y = (accel.x * (2*q.x*q.y + 2*q.w*q.z)) + (accel.y * (1 - 2*q.x*q.x - 2*q.z*q.z)) + (accel.z * (2*q.y*q.z - 2*q.w*q.x));
+        aaWorld.z = (accel.x * (2*q.x*q.z - 2*q.w*q.y)) + (accel.y * (2*q.y*q.z + 2*q.w*q.x)) + (accel.z * (1 - 2*q.x*q.x - 2*q.y*q.y));
+        
+        mpu.dmpGetGyro(&gyro, FIFOBuffer);
+
+        // Usa aaWorld purificado do vetor de gravidade e alinhado aos eixos do chão:
+        diffCar.accel_d[0] = aaWorld.x / IMU_CONST;
+        diffCar.accel_d[1] = aaWorld.y / IMU_CONST;
+        diffCar.accel_d[2] = aaWorld.z / IMU_CONST;
+        diffCar.gyro_d[0] = gyro.x;
+        diffCar.gyro_d[1] = gyro.y;
+        diffCar.gyro_d[2] = gyro.z;
+        diffCar.ypr_d[0] = -ypr[0]; // Sinal invertido para casar com o sistema do robô
     }
-
-    // Só processa se tiver pacote completo
-    if (fifoCount < packetSize) return;
-
-    // Ler um pacote do FIFO
-    mpu.getFIFOBytes(FIFOBuffer, packetSize);
-
-    mpu.dmpGetQuaternion(&q, FIFOBuffer);
-
-    // --- QUATERNION ---
-    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-
-    mpu.dmpGetGravity(&gravity, &q);
-    
-    mpu.dmpGetAccel(&aa, FIFOBuffer);
-    
-    mpu.dmpGetLinearAccel(&accel, &aa, &gravity);
-    
-    mpu.dmpGetGyro(&gyro, FIFOBuffer);
-    diffCar.accel_d[0] = accel.x/8192;
-    diffCar.accel_d[1] = accel.y/8192;
-    diffCar.accel_d[2] = accel.z/8192;
-    diffCar.gyro_d[0] = gyro.x;
-    diffCar.gyro_d[1] = gyro.y;
-    diffCar.gyro_d[2] = gyro.z;
-    diffCar.ypr_d[0] = -ypr[0];
-    
 }
 
 

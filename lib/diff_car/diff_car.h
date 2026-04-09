@@ -48,6 +48,9 @@ public:
     int left_motor_dir  = 1;
     int right_motor_dir = 1;
 
+    float min_pwm_left = 35.0f;
+    float min_pwm_right = 35.0f;
+
     // ============================
     // Encoder → PCNT MODE
     // ============================
@@ -110,6 +113,7 @@ public:
     void set_motor_speed_ms(float vel_left, float vel_right);
     void handler_motor();
     MotorPwmResult set_motor_speed_msr(float vel_left, float vel_right);
+    void calibrate_motors_inertia();
 
     // Encoder functions
     void debug_encoder();
@@ -117,8 +121,6 @@ public:
     void debug_raw_pins();
     // IMU functions
     void mpu_update();
-
-    uint8_t teapotPacket[14] = { '$', 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, '\r', '\n' };
 
     // Leds functions
     byte datArray[8] = {0,0,0,0,0,0,0,0};
@@ -131,16 +133,12 @@ public:
     Odometry odom_real;
     void encoder_odometry_update();
 
-    // EKF functions
-    void ekf_step_with_gyro_rate(float dt, double gyro_z, float v_enc, double yaw_meas_rad);
-    void ekf_init_diffcar();
-    void debug_ekf();
-
     // Navigation functions
     void navigate_to(float target_x, float target_y, float target_theta, float precision, float target_velocity);
     void navigate_delta(float delta_x, float delta_y, float delta_theta);
     void debug_nav();
-    void navegar_reto(double dist);
+    void manter_rumo(float velocidade_linear, float angulo_desejado);
+    void mover_distancia(float metros, float velocidade_linear = 0.3f);
 };
 
 extern DiffCar diffCar;

@@ -396,6 +396,7 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
+.pio/*
 # VS Code files for those working on multiple tools
 .vscode/*
 !.vscode/settings.json

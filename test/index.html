@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robo 3D Telemetry</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.2.8/mqtt.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #111; }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; pointer-events: none; }
+        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: grid; grid-template-columns: repeat(3, 80px); gap: 10px; }
+        button { padding: 15px; cursor: pointer; background: #444; color: white; border: none; border-radius: 5px; font-weight: bold; }
+        button:active { background: #666; }
+        .status { color: #0f0; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h2>Status do Robo</h2>
+    <p>MQTT: <span id="mqtt_status" style="color: red;">Desconectado</span></p>
+    <p>X: <span id="val_x">0.00</span> | Y: <span id="val_y">0.00</span></p>
+    <p>Theta: <span id="val_t">0.00</span> rad</p>
+    <hr>
+    <h3>Motores (m/s)</h3>
+    <p>Esq: <span id="val_vl">0.00</span> | Alvo Esq: <span id="val_vlt">0.00</span></p>
+    <p>Dir: <span id="val_vr">0.00</span> | Alvo Dir: <span id="val_vrt">0.00</span></p>
+    <hr>
+    <h3>IMU</h3>
+    <p>Accel (g): X:<span id="val_ax">0</span> Y:<span id="val_ay">0</span> Z:<span id="val_az">0</span></p>
+    <p>Gyro (°/s): X:<span id="val_gx">0</span> Y:<span id="val_gy">0</span> Z:<span id="val_gz">0</span></p>
+    <p>Yaw IMU: <span id="val_yaw">0</span> rad</p>
+</div>
+
+<div id="charts" style="position: absolute; top: 10px; right: 10px; width: 400px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px;">
+    <h3 style="color: white; margin-top: 0;">IMU Plot</h3>
+    <canvas id="imuChart" width="400" height="200"></canvas>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</div>
+
+<div id="controls">
+    <button style="grid-column: 2" onclick="sendCmd('DNX=MF')">FRENTE</button>
+    <button onclick="sendCmd('DNX=GE')">ESQ</button>
+    <button onclick="sendCmd('DNX=PA')">PARA</button>
+    <button onclick="sendCmd('DNX=GD')">DIR</button>
+    <button style="grid-column: 2" onclick="sendCmd('DNX=MT')">TRAS</button>
+</div>
+
+<div id="nav-controls" style="position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; color: white; display: flex; flex-direction: column; gap: 5px;">
+    <b>Navegar para Coordenada:</b>
+    <div><label>X:</label> <input type="number" id="inp_x" value="1.0" step="0.1" style="width: 50px;"></div>
+    <div><label>Y:</label> <input type="number" id="inp_y" value="0.0" step="0.1" style="width: 50px;"></div>
+    <div><label>Ângulo (rad):</label> <input type="number" id="inp_t" value="0.0" step="0.1" style="width: 50px;"></div>
+    <button onclick="sendNavCmd()" style="margin-top: 5px; background: #0077ff;">IR PARA (X, Y)</button>
+    <small style="color: yellow; margin-top: 5px;">Dica: Você também pode Clicar<br>no chão do mapa (Grid)!</small>
+</div>
+
+<script>
+    // --- CONFIGURAÇÃO MQTT ---
+    // Nota: O ESP32 usa porta 1883 (TCP). O navegador EXIGE WebSockets (geralmente porta 9001 ou 15675)
+    // Se o seu broker não tiver WebSockets ativo, essa interface não conectará.
+    const broker = 'ws://10.0.0.134:9001'; 
+    const client = mqtt.connect(broker);
+
+    client.on('connect', () => {
+        document.getElementById('mqtt_status').innerText = 'Conectado';
+        document.getElementById('mqtt_status').style.color = '#0f0';
+        client.subscribe('telemetry');
+    });
+
+    function sendCmd(cmd) {
+        client.publish('cmd', cmd);
+        console.log("Enviado:", cmd);
+    }
+
+    function sendNavCmd(x, y, theta) {
+        // Se chamado sem parametros, pega os valores da caixinha (Inputs HTML)
+        if(x === undefined) {
+             x = parseFloat(document.getElementById('inp_x').value);
+             y = parseFloat(document.getElementById('inp_y').value);
+             theta = parseFloat(document.getElementById('inp_t').value);
+        }
+        
+        let cmd = `DNX=GO:${x.toFixed(2)}:${y.toFixed(2)}:${theta.toFixed(2)}`;
+        client.publish('cmd', cmd);
+        console.log("Comando de Navegação Enviado:", cmd);
+        
+        // Pinta um ponto de destino esverdeado no mundo 3D
+        if (!window.targetSphere) {
+             const geo = new THREE.SphereGeometry(0.1);
+             const mat = new THREE.MeshBasicMaterial({color: 0x00ff00});
+             window.targetSphere = new THREE.Mesh(geo, mat);
+             scene.add(window.targetSphere);
+        }
+        window.targetSphere.position.set(x, 0.05, -y); // Inverso do Y igual odometria
+    }
+
+    // --- CENA 3D (THREE.JS) ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Chão (Grid)
+    const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+    scene.add(grid);
+
+    // ==========================================
+    // ROBÔ (GLTF / GLB - Modelos Importados)
+    // ==========================================
+    const carGroup = new THREE.Group();
+    // Reduzimos um pouco a escala global do grupo pra caber bem no grid do Odom:
+    carGroup.scale.set(0.1, 0.1, 0.1); 
+    scene.add(carGroup);
+
+    // Seta da IMU (Acelerômetro)
+    const imuDir = new THREE.Vector3(0, 0, 1);
+    const imuOrigin = new THREE.Vector3(0, 5, 0); // Fica acima da cabeça dele p/ nao esconder
+    const imuArrowHelp = new THREE.ArrowHelper(imuDir, imuOrigin, 3.5, 0xff0000, 1.0, 0.5);
+    carGroup.add(imuArrowHelp);
+
+    // Setup Loaders
+    const dracoLoader = new THREE.DRACOLoader();
+    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+    const loader = new THREE.GLTFLoader();
+    loader.setDRACOLoader(dracoLoader);
+
+    // Função universal para carregar as pecinhas reproduzindo EXATAMENTE o seu script
+    function loadRobotPart(path, params) {
+        loader.load(path, function(gltf) {
+            gltf.scene.scale.set(10, 10, 10);
+            const box = new THREE.Box3().setFromObject(gltf.scene);
+            const c = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+
+            // A lógica de recentralização baseada no seu script para cada tipo de peça
+            if (params.centerType === 1) {
+                gltf.scene.position.set(size.z/2 - c.x, -c.y, size.z/2 - c.z);
+            } else if (params.centerType === 2) {
+                gltf.scene.position.set(-c.x, -c.y, size.z/2 - c.z);
+            } else if (params.centerType === 3) {
+                gltf.scene.position.set(-c.x, size.y/2 - c.y, -c.z);
+            } else if (params.centerType === 4) {
+                gltf.scene.position.set(-c.x, -c.y, -c.z);
+            }
+
+            const dummyGrp = new THREE.Object3D();
+            dummyGrp.add(gltf.scene);
+            dummyGrp.position.set(params.x || 0, params.y || 0, params.z || 0);
+
+            if (params.rX !== undefined) dummyGrp.rotation.x = params.rX;
+            if (params.rY !== undefined) dummyGrp.rotation.y = params.rY;
+            if (params.rZ !== undefined) dummyGrp.rotation.z = params.rZ;
+            
+            carGroup.add(dummyGrp);
+        });
+    }
+
+    // Carregamento EXATO das distâncias, offsets e rotações do seu script (com peças Left e Right)
+    loadRobotPart('models/Base.gltf',               { centerType: 2, y: 0.20, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+    loadRobotPart('models/Tampa.gltf',              { centerType: 2, y: 0.5106, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+    loadRobotPart('models/Suporte PCB.gltf',        { centerType: 1, x: -0.0006, y: 0.510802, z: 0.5453, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+    
+    // Motores
+    loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: 0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Esq
+    loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: -0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Dir
+    
+    // Rodas Principais
+    loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: 0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
+    loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: -0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+    
+    // Caster Wheel Frontal
+    loadRobotPart('models/Caster Base.glb',         { centerType: 1, x: -0.05, y: 0.276802, z: 0.5615, rX: 1.5 * Math.PI });
+    loadRobotPart('models/Caster Wheel Holder.glb', { centerType: 1, x: -0.0085, y: 0.0595, z: 0.727, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+    loadRobotPart('models/Caster WheelShin2.glb',   { centerType: 1, x: -0.0085, y: -0.0410, z: 0.867, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+
+    // Encoder pecas 
+    loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: 0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Esq
+    loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: -0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+    loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: 0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
+    loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: -0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+
+    // Luzes
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(5, 5, 5).normalize();
+    scene.add(light);
+    scene.add(new THREE.AmbientLight(0x404040));
+
+    // Aproximei a câmera para ver o modelo melhor de perto
+    camera.position.set(0, 1.2, 1.4);
+    camera.lookAt(0, 0, 0);
+
+    // Controles de Orbita p/ Rotação e Zoom Livres com o Mouse
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.target.set(0, 0, 0);
+
+    // --- RAYCASTER PARA CLIQUE NO GRID (NAVEGAÇÃO COM MOUSE) ---
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    // Grid Helper invisível para captar clicks (Plane)
+    const floorGeo = new THREE.PlaneGeometry(40, 40);
+    const floorMat = new THREE.MeshBasicMaterial({color: 0x000000, visible: false});
+    const floorPlane = new THREE.Mesh(floorGeo, floorMat);
+    floorPlane.rotation.x = -Math.PI / 2;
+    scene.add(floorPlane);
+
+    window.addEventListener('click', (event) => {
+        // Ignora cliques no painel superior (UI/Botões)
+        if (event.clientY < 250 || event.clientX > window.innerWidth - 450) return;
+        
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        
+        const intersects = raycaster.intersectObject(floorPlane);
+        if (intersects.length > 0) {
+            const p = intersects[0].point;
+            // X continua X, Z (mundo 3D) converte para -Y no Odometria
+            const targetX = p.x;
+            const targetY = -p.z; 
+            
+            // Atualiza caixinhas
+            document.getElementById('inp_x').value = targetX.toFixed(2);
+            document.getElementById('inp_y').value = targetY.toFixed(2);
+            
+            // Desenha a bolinha (Mira) mas NÃO envia até apertar o botão
+            if (!window.targetSphere) {
+                 const geo = new THREE.SphereGeometry(0.1);
+                 const mat = new THREE.MeshBasicMaterial({color: 0x00ff00});
+                 window.targetSphere = new THREE.Mesh(geo, mat);
+                 scene.add(window.targetSphere);
+            }
+            // Ajustamos o target para corresponder à mesma direção visual do mapa
+            window.targetSphere.position.set(targetX, 0.05, -targetY); 
+        }
+    });
+
+    // --- CONFIGURAÇÃO DO GRÁFICO (CHART.JS) ---
+    const ctx = document.getElementById('imuChart').getContext('2d');
+    const maxDataPoints = 50;
+    const imuChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: Array(maxDataPoints).fill(''),
+            datasets: [
+                { label: 'Accel X', borderColor: 'red', data: [], fill: false, borderWidth: 1, pointRadius: 0 },
+                { label: 'Accel Y', borderColor: 'green', data: [], fill: false, borderWidth: 1, pointRadius: 0 },
+                { label: 'Accel Z', borderColor: 'blue', data: [], fill: false, borderWidth: 1, pointRadius: 0 }
+            ]
+        },
+        options: {
+            responsive: true,
+            animation: false,
+            scales: { y: { suggestedMin: -2, suggestedMax: 2 } },
+            plugins: {
+                legend: { labels: { color: 'white' } }
+            }
+        }
+    });
+
+    // --- ATUALIZAÇÃO DE TELEMETRIA ---
+    client.on('message', (topic, message) => {
+        if (topic === 'telemetry') {
+            const data = JSON.parse(message.toString());
+            
+            // Atualiza UI Texto
+            document.getElementById('val_x').innerText = data.x.toFixed(2);
+            document.getElementById('val_y').innerText = data.y.toFixed(2);
+            document.getElementById('val_t').innerText = data.theta.toFixed(2);
+            document.getElementById('val_ax').innerText = data.accel_x.toFixed(2);
+            document.getElementById('val_ay').innerText = data.accel_y.toFixed(2);
+            document.getElementById('val_az').innerText = data.accel_z.toFixed(2);
+            document.getElementById('val_gx').innerText = data.gyro_x.toFixed(1);
+            document.getElementById('val_gy').innerText = data.gyro_y.toFixed(1);
+            document.getElementById('val_gz').innerText = data.gyro_z.toFixed(1);
+            document.getElementById('val_yaw').innerText = data.yaw_imu.toFixed(2);
+            document.getElementById('val_vlt').innerText = data.left_vel_target !== undefined ? data.left_vel_target.toFixed(2) : "0.00";
+            document.getElementById('val_vrt').innerText = data.right_vel_target !== undefined ? data.right_vel_target.toFixed(2) : "0.00";
+
+            // Atualiza o gráfico de acceleração
+            imuChart.data.datasets[0].data.push(data.accel_x);
+            imuChart.data.datasets[1].data.push(data.accel_y);
+            imuChart.data.datasets[2].data.push(data.accel_z);
+
+            // Remove antigos
+            if (imuChart.data.datasets[0].data.length > maxDataPoints) {
+                imuChart.data.datasets[0].data.shift();
+                imuChart.data.datasets[1].data.shift();
+                imuChart.data.datasets[2].data.shift();
+            }
+            imuChart.update();
+
+            // Atualiza Posição 3D
+            // Invertemos o Y/Z dependendo da convenção da sua odometria
+            carGroup.position.x = data.x;
+            carGroup.position.z = -data.y; // Inversão comum em 3D
+            // Subtrai-se 90 graus (PI/2) para corrigir o offset do modelo 3D
+            carGroup.rotation.y = data.theta + (Math.PI / 2); 
+            
+            // Atualiza o ArrowHelper (Acelerômetro)
+            // Relativo ao grupo do carro: Z é frente, X é lado, Y é cima
+            const imuVec = new THREE.Vector3(-data.accel_y, data.accel_z, data.accel_x);
+            const imuLen = imuVec.length();
+            if(imuLen > 0.05) {
+                imuArrowHelp.setDirection(imuVec.normalize());
+                imuArrowHelp.setLength(imuLen * 0.5, 0.1, 0.05);
+            }
+
+            // Ajustamos o OrbitControls para seu Ponto Central (Foco) ser sempre no robô em movimento
+            // Como não travaremos mais a position XYZ, a câmera acompanhará livremente
+            controls.target.set(data.x, 0, -data.y);
+            controls.update();
+        }
+    });
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update(); // Interpola a suavidade do movimento do mouse
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>

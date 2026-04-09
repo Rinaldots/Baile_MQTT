@@ -38,7 +38,7 @@ void DiffCar::setup_encoder() {
     // Filter: 100 cycles at 80MHz is ~1.25us. 
     // If you have a noisy mechanical switch, increase to 1000. 
     // If optical, 100 is fine.
-    pcnt_set_filter_value(PCNT_LEFT_UNIT, 150); 
+    pcnt_set_filter_value(PCNT_LEFT_UNIT, 1000); 
     pcnt_filter_enable(PCNT_LEFT_UNIT);
 
     // Clear and Start
@@ -54,7 +54,7 @@ void DiffCar::setup_encoder() {
 
     pcnt_unit_config(&right);
     
-    pcnt_set_filter_value(PCNT_RIGHT_UNIT, 150);
+    pcnt_set_filter_value(PCNT_RIGHT_UNIT, 1000);
     pcnt_filter_enable(PCNT_RIGHT_UNIT);
     
     pcnt_counter_pause(PCNT_RIGHT_UNIT);
@@ -74,7 +74,8 @@ void DiffCar::setup_encoder() {
 void DiffCar::velocity_update() {
 
     unsigned long now_us = micros();
-    const unsigned long window_us = 50000UL; // 50 ms
+    // Usa tempo configurado globalmente para sincronizar com o Main Loop
+    const unsigned long window_us = LOOP_FAST_US; 
     if (now_us - last_vel_update_us < window_us) return;
     unsigned long dt = now_us - last_vel_update_us;
     last_vel_update_us = now_us;
@@ -94,8 +95,8 @@ void DiffCar::velocity_update() {
     float left_freq  = (float)dleft  * 1e6f / dt;
     float right_freq = (float)dright * 1e6f / dt;
 
-    // EMA filter
-    const float alpha = 0.4f;
+    // EMA filter (Aprimorada para menor retenção de passado)
+    const float alpha = 0.35f;
 
     left_freq_filtered  = (1 - alpha) * left_freq_filtered  + alpha * left_freq;
     right_freq_filtered = (1 - alpha) * right_freq_filtered + alpha * right_freq;
