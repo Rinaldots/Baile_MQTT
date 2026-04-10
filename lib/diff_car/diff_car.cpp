@@ -23,86 +23,147 @@ void DiffCar::setup() {
 void DiffCar::encoder_odometry_update() {
     static unsigned long last_odom_time = micros();
     unsigned long current_time = micros();
-    float dt = (current_time - last_odom_time) / 1000000.0f;
+    float dt = (current_time - last_odom_time) * 1e-6f;
     last_odom_time = current_time;
 
-    float vl = left_velocity_ms;
-    float vr = right_velocity_ms; 
-    if (!left_motor_dir){
-        vl = -vl;
-    }
-    if (!right_motor_dir){
-        vr = -vr;
-    }
-    float L = WHEEL_BASE_M;     
-    float v = (vr + vl) / 2.0f;             
-    float omega = (vr - vl) / L;              
+    float vl = left_motor_dir ? left_velocity_cms : -left_velocity_cms;
+    float vr = right_motor_dir ? right_velocity_cms : -right_velocity_cms; 
+
+    float v = (vr + vl) * 0.5f;             
+    float omega = (vr - vl) * (1.0f / WHEEL_BASE_CM);              
     
     odom_enc.linear_velocity = v;
     odom_enc.angular_velocity = omega;
 
-    // ==============================================================
-    // Filtro de Kalman 1D para fundir odom_enc e ypr_d[0] (IMU)
-    // ==============================================================
-    static float theta_k = 0.0f; // Estado estimado (Ângulo)
-    static float P_k = 1.0f;     // Covariância do Erro
-    
-    // Parâmetros de Tuning do Kalman (Variâncias Mínimas)
-    float Q = 0.001f; // Ruído de Processo (Incerteza do Encoder)
-    float R = 0.05f;  // Ruído de Medição (Incerteza do Yaw da IMU)
-
-    // 1. Predição (Prediction Step) -> O que os encoders acham que aconteceu?
-    float theta_pred = theta_k + (omega * dt);
-    float P_pred = P_k + Q;
-
-    // 2. Coleta a medição da IMU garantindo não pular de 180 pra -180 bruscamente
-    float z_imu = ypr_d[0];
-    
-    // Calcula a inovação do erro pelo caminho mais curto no círculo
-    float y_inovacao = wrapAngleD(z_imu - theta_pred);
-
-    // 3. Atualização (Update Step) -> Ganho de Kalman
-    float K = P_pred / (P_pred + R);
-    
-    // 4. Estado final: Onde realmente estamos
-    theta_k = wrapAngleD(theta_pred + (K * y_inovacao));
-    P_k = (1.0f - K) * P_pred;
-    
-    // Atrita Odometria Real (Yaw)
-    odom_real.theta = theta_k;
+    // Failsafe para pauses da Task ou Boot inicial (evita pulos abruptos)
+    if (dt > 0.5f) dt = 0.0f;
 
     // ==============================================================
-    // Filtro de Kalman 1D para fundir Velocidade Linear (IMU + Encoders)
+    // EKF - Filtro de Kalman Estendido 4D
+    // Estados: X = [ x, y, theta, velocidade_linear ]
+    // Controles: u = [ omega_encoder, aceleração_IMU ]
+    // Sensores (Medição): Z = [ theta_IMU, velocidade_Encoder ]
     // ==============================================================
-    // A IMU não consegue prever Posição (X) direto sem virar um caos de drift,
-  
-    static float v_k = 0.0f;     
-    static float Pv_k = 1.0f;    
-    
-    float Q_v = 0.001f; // Incerteza da aceleração da IMU (Ruído de Processo)
-    float R_v = 0.5f;  // Incerteza do Encoder (Ruído de Medição)
-    
-    float imu_a_forward = accel_d[1]; 
+    static float X_k[4] = {0.0f, 0.0f, 0.0f, 0.0f}; 
+    static float P_k[4][4] = {
+        {1.0f, 0, 0, 0},
+        {0, 1.0f, 0, 0},
+        {0, 0, 1.0f, 0},
+        {0, 0, 0, 1.0f}
+    };
 
-    // 1. Predição: A IMU diz o quanto a velocidade mudou baseado na força G
-    float v_pred = v_k + (imu_a_forward * dt);
-    float Pv_pred = Pv_k + Q_v;
+    // Ajuste aqui os Ruídos (Q = Confiança no Movimento, R = Confiança no Sensor)
+    constexpr float Q[4] = {
+    50.0f,    // x       [cm²]      — incerteza do modelo cinemático
+    50.0f,    // y       [cm²]      — idem
+    1e-4f,    // theta   [rad²]     — drift real do giroscópio MPU6050
+    100.0f    // v       [cm²/s²]   — acelerômetro + escorregamento de roda
+    };
+    constexpr float R[2] = {
+    0.02f,    // theta_IMU  [rad²]  — drift do yaw MPU6050 (sem mag = ruim)
+    50.0f     // v_encoder  [cm²/s²]— encoder é confiável, use valor baixo
+    };     
 
-    // 2. Medição: O Encoder diz o quanto a roda girou
-    float z_v = v; // v = (vl+vr)/2.0f
-    float y_v_inovacao = z_v - v_pred;
+    // 1. PREDIÇÃO (Prediction Step)
+    float x_pred     = X_k[0] + X_k[3] * cosf(X_k[2]) * dt;
+    float y_pred     = X_k[1] + X_k[3] * sinf(X_k[2]) * dt;
+    float theta_pred = wrapAngleD(X_k[2] + omega * dt); 
+    // aceleração convertida de m/s² para cm/s² (100x)
+    float v_pred     = X_k[3] + (accel_d[1] * 100.0f) * dt;       
 
-    // 3. Atualização (Update Step)
-    float K_v = Pv_pred / (Pv_pred + R_v);
-    v_k = v_pred + (K_v * y_v_inovacao);
-    Pv_k = (1.0f - K_v) * Pv_pred;
+    float X_pred[4] = {x_pred, y_pred, theta_pred, v_pred};
 
-    // Atualiza a posição X e Y integrando a velocidade fundida e o rumo fundido
-    if (dt > 0.0f && dt < 0.2f) { // Failsafe para pausadas longas
-        odom_real.x += v_k * cosf(odom_real.theta) * dt;
-        odom_real.y += v_k * sinf(odom_real.theta) * dt;
+    // Matriz Jacobiana F (Derivadas parciais do modelo para atualização da incerteza)
+    float F[4][4] = {
+        {1.0f, 0.0f, -X_k[3] * sinf(X_k[2]) * dt,  cosf(X_k[2]) * dt},
+        {0.0f, 1.0f,  X_k[3] * cosf(X_k[2]) * dt,  sinf(X_k[2]) * dt},
+        {0.0f, 0.0f,  1.0f,                        0.0f},
+        {0.0f, 0.0f,  0.0f,                        1.0f}
+    };
+
+    // Covariância predita: P_pred = F * P_k * F^T + Q
+    float FP[4][4] = {0};
+    for(int i=0; i<4; i++)
+        for(int j=0; j<4; j++)
+            for(int k=0; k<4; k++)
+                FP[i][j] += F[i][k] * P_k[k][j];
+
+    float P_pred[4][4] = {0};
+    for(int i=0; i<4; i++)
+        for(int j=0; j<4; j++) {
+            for(int k=0; k<4; k++)
+                P_pred[i][j] += FP[i][k] * F[j][k]; // Multiplica por F transposta
+            if(i == j) P_pred[i][j] += Q[i];        // Soma Ruído de Processo
+        }
+
+    // 2. ATUALIZAÇÃO (Update Step)
+    // Se o robô bateu, invalidamos temporariamente o encoder (patinando/girando falso)
+    float R_encoder = R[1];
+    if (in_recovery) {
+        R_encoder = 100000.0f; // Incerteza altíssima na roda
     }
-    odom_real.linear_velocity = v_k;
+
+    // Inovação y = Z - H*X_pred
+    float y_inov[2];
+    y_inov[0] = wrapAngleD(ypr_d[0] - X_pred[2]); 
+    y_inov[1] = v - X_pred[3];                    
+
+    // Covariância da Inovação: S = H * P_pred * H^T + R
+    float S[2][2];
+    S[0][0] = P_pred[2][2] + R[0];
+    S[0][1] = P_pred[2][3];
+    S[1][0] = P_pred[3][2];
+    S[1][1] = P_pred[3][3] + R_encoder;
+
+    // Inversa de S (S_inv)
+    float det = S[0][0]*S[1][1] - S[0][1]*S[1][0];
+    float S_inv[2][2] = {0};
+    if (fabs(det) > 1e-6f) { 
+        S_inv[0][0] =  S[1][1] / det;
+        S_inv[0][1] = -S[0][1] / det;
+        S_inv[1][0] = -S[1][0] / det;
+        S_inv[1][1] =  S[0][0] / det;
+    }
+
+    // Ganho de Kalman: K = P_pred * H^T * S_inv
+    float PHT[4][2];
+    for(int i=0; i<4; i++) {
+        PHT[i][0] = P_pred[i][2]; // Extrai coluna Theta (2)
+        PHT[i][1] = P_pred[i][3]; // Extrai coluna Vel. Linear (3)
+    }
+    
+    float K_gain[4][2] = {0};
+    for(int i=0; i<4; i++)
+        for(int j=0; j<2; j++)
+            for(int k=0; k<2; k++)
+                K_gain[i][j] += PHT[i][k] * S_inv[k][j];
+
+    // Corrige os Estados: X_k = X_pred + K * y_inov
+    for(int i=0; i<4; i++) {
+        X_k[i] = X_pred[i] + K_gain[i][0]*y_inov[0] + K_gain[i][1]*y_inov[1];
+    }
+    X_k[2] = wrapAngleD(X_k[2]); 
+
+    // Atualiza a Covariância do Modelo: P_k = (I - K*H) * P_pred
+    float I_KH[4][4] = {0};
+    for(int i=0; i<4; i++) {
+        I_KH[i][i] = 1.0f;
+        I_KH[i][2] -= K_gain[i][0];
+        I_KH[i][3] -= K_gain[i][1];
+    }
+    
+    for(int i=0; i<4; i++)
+        for(int j=0; j<4; j++) {
+            P_k[i][j] = 0;
+            for(int k=0; k<4; k++)
+                P_k[i][j] += I_KH[i][k] * P_pred[k][j];
+        }
+
+    // Exportação dos Estados Corrigidos pelo Filtro
+    odom_real.x = X_k[0];
+    odom_real.y = X_k[1];
+    odom_real.theta = X_k[2];
+    odom_real.linear_velocity = X_k[3];
 }
 
 
@@ -111,7 +172,7 @@ void DiffCar::navigate_delta(float delta_x, float delta_y, float delta_theta)
     this->target_x = odom_real.x + delta_x;
     this->target_theta = odom_real.theta + delta_theta;
 }
-
+/*
 void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
                           float precision, float target_velocity)
 {
@@ -137,7 +198,7 @@ void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
             
         w = constrain(w, -VEL_MAX_ANG, VEL_MAX_ANG);
         
-        float L = WHEEL_BASE_M;
+        float L = WHEEL_BASE_CM;
         left_velocity_target  = -w * L * 0.5f;
         right_velocity_target =  w * L * 0.5f;
 
@@ -154,23 +215,24 @@ void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
     float path_angle = atan2(dy, dx);
     float angle_error = wrapAngleD(path_angle - odom_real.theta);
     
-    // Controle polar
-    // Acelera gradativo, mas zera a velocidade linear se ele estiver muito virado pros lados (> 45 graus / 0.7 rad) 
-    // pro robô rodar no eixo primeiro antes de dar o bote.
-    float v_cmd = target_velocity * tanh(distance * 2.0f); // Modificado para chegar + rapido
-    if (fabs(angle_error) > 0.6f) {
-        v_cmd *= 0.1f; // Corta 90% da lin. vel pra forçar girar primeiro 
-    }
+    // Controle polar suave (Trajetória Aprimorada)
+    // A velocidade linear é atenuada de forma contínua pelo alinhamento angular do robô.
+    // Isso evita cortes bruscos e saltos na velocidade linear.
+    // Usando cos() focamos o movimento apenas para frente. Elevado ao cubo, o controle 
+    // "pune" o desalinhamento, priorizando girar no próprio eixo antes de avançar com tudo.
+    float alinhamento = fmax(0.0f, cosf(angle_error));
+    float v_cmd = target_velocity * tanh(distance * 2.0f) * powf(alinhamento, 3.0f);
     
-    // Garante que se tiver distante o suficiente, envia pelo menos a min lin
-    if(distance > precision && fabs(v_cmd) < VEL_MIN_LIN && fabs(angle_error) < 0.6f) {
-        v_cmd = copysign(VEL_MIN_LIN, v_cmd);
+    // Garante que se tiver distante o suficiente e bem alinhado, envia pelo menos a min lin
+    if (distance > precision && fabs(v_cmd) < VEL_MIN_LIN && alinhamento > 0.8f) {
+        v_cmd = copysign(VEL_MIN_LIN, target_velocity);
     }
     
     v_cmd = constrain(v_cmd, -VEL_MAX_LIN, VEL_MAX_LIN);
 
-    float Kp_line = 3.0f;  
-    float Kd_line = 0.3f;  
+    // Controle Proporcional-Derivativo de Giro
+    float Kp_line = 3.5f;  
+    float Kd_line = 0.8f;  
 
     float w_cmd = (Kp_line * angle_error) - (Kd_line * current_w);
 
@@ -179,7 +241,7 @@ void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
 
     w_cmd = constrain(w_cmd, -VEL_MAX_ANG, VEL_MAX_ANG);
 
-    float L = WHEEL_BASE_M;
+    float L = WHEEL_BASE_CM;
     float vl = v_cmd - (w_cmd * L * 0.5f);
     float vr = v_cmd + (w_cmd * L * 0.5f);
 
@@ -194,16 +256,181 @@ void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
     left_velocity_target  = vl;
     right_velocity_target = vr;
 }
+*/
+void DiffCar::navigate_to_target_pure_pursuit(
+    float target_x, 
+    float target_y, 
+    float target_theta,   // pode ser NAN
+    float precision, 
+    float target_velocity)
+{
+    float dx = target_x - odom_real.x;
+    float dy = target_y - odom_real.y;
+    float distance = sqrt(dx * dx + dy * dy);
+
+    // =========================
+    // DETECÇÃO DE IMPACTO (Anti-Colisão / Slip)
+    // =========================
+    // Se o acelerômetro registrar impacto > 3.0 m/s^2 (G > 0.3), robô bateu.
+    if (fabs(accel_d[1]) > 3.0f || fabs(accel_d[0]) > 3.0f) {
+        last_shock_time = millis();
+        in_recovery = true;
+    }
+
+    if (in_recovery) {
+        // Ignora a trajetória por 2.5 segundos para dar ré e girar desvencilhando
+        unsigned long t_recovery = millis() - last_shock_time;
+        if (t_recovery < 1000) {
+            // Primeiro 1s: dar ré (-20 cm/s)
+            left_velocity_target = -20.0f;
+            right_velocity_target = -20.0f;
+            return;
+        } else if (t_recovery < 2500) {
+            // De 1.0s até 2.5s: girar (-w_min) para se afastar
+            left_velocity_target = -VEL_MIN_ANG * WHEEL_BASE_CM * 0.5f;
+            right_velocity_target = VEL_MIN_ANG * WHEEL_BASE_CM * 0.5f;
+            return;
+        } else {
+            in_recovery = false; // Acabou o susto, volta a seguir do novo X/Y
+        }
+    }
+
+    float current_w = odom_enc.angular_velocity;
+
+    // =========================
+    // USO DE ORIENTAÇÃO (OPCIONAL)
+    // =========================
+    bool use_heading = !isnan(target_theta);
+
+    float final_error = 0.0f;
+    if (use_heading) {
+        final_error = wrapAngleD(target_theta - odom_real.theta);
+    }
+
+    // =========================
+    // LOOKAHEAD DINÂMICO
+    // =========================
+    float base_Ld = distance * 0.5f;
+    float Ld = base_Ld + fabs(target_velocity) * 0.3f;
+    Ld = constrain(Ld, 20.0f, 120.0f);
+
+    if (distance < 1e-5f) distance = 1e-5f;
+
+    // ponto lookahead
+    float look_x = odom_real.x + (dx / distance) * Ld;
+    float look_y = odom_real.y + (dy / distance) * Ld;
+
+    // referencial do robô
+    float dx_r = look_x - odom_real.x;
+    float dy_r = look_y - odom_real.y;
+
+    float x_r =  cos(odom_real.theta) * dx_r + sin(odom_real.theta) * dy_r;
+    float y_r = -sin(odom_real.theta) * dx_r + cos(odom_real.theta) * dy_r;
+
+    // =========================
+    // CURVATURA
+    // =========================
+    float curvature = (2.0f * y_r) / (Ld * Ld);
+    curvature = constrain(curvature, -4.0f, 4.0f);
+
+    // =========================
+    // CORREÇÃO DE ORIENTAÇÃO (SÓ SE ATIVADA)
+    // =========================
+    if (use_heading) {
+        float heading_weight = exp(-distance * 1.5f);
+        float heading_correction = final_error * heading_weight;
+        curvature += heading_correction;
+    }
+
+    // =========================
+    // VELOCIDADE LINEAR E RETA (ALINHA ANTES DE ANDAR)
+    // =========================
+    float path_angle = atan2(dy, dx);
+    float angle_error_path = wrapAngleD(path_angle - odom_real.theta);
+
+    float v_cmd = target_velocity * fmin(1.0f, distance / 50.0f);
+
+    // Se estiver desalinhado e longe, para e apenas gira no eixo
+    bool aligning_in_place = false;
+    if (distance > precision && fabs(angle_error_path) > 0.15f) {
+        v_cmd = 0.0f;
+        aligning_in_place = true;
+    } else {
+        // reduz linear em curvas normais
+        v_cmd *= 1.0f / (1.0f + fabs(curvature) * 2.5f);
+
+        // desaceleração perto do alvo
+        float slow_factor = distance / (precision + 0.01f);
+        slow_factor = constrain(slow_factor, 0.0f, 1.0f);
+        v_cmd *= slow_factor;
+
+        if (fabs(v_cmd) < VEL_MIN_LIN)
+            v_cmd = copysign(VEL_MIN_LIN * slow_factor, v_cmd);
+
+        v_cmd = constrain(v_cmd, -VEL_MAX_LIN, VEL_MAX_LIN);
+    }
+
+    // =========================
+    // VELOCIDADE ANGULAR
+    // =========================
+    float w_cmd = 0.0f;
+    if (aligning_in_place) {
+        // Gira no lugar na direção do alvo
+        w_cmd = angle_error_path * 4.0f;
+    } else {
+        // Comportamento normal do Pure Pursuit para seguir reta sem oscilar
+        w_cmd = v_cmd * curvature;
+    }
+
+    // damping
+    w_cmd -= current_w * 0.2f;
+
+    if (fabs(w_cmd) < VEL_MIN_ANG && fabs(curvature) > 0.05f)
+        w_cmd = copysign(VEL_MIN_ANG, w_cmd);
+
+    w_cmd = constrain(w_cmd, -VEL_MAX_ANG, VEL_MAX_ANG);
+
+    // =========================
+    // CINEMÁTICA DIFERENCIAL
+    // =========================
+    float L = WHEEL_BASE_CM;
+
+    float vl = v_cmd - (w_cmd * L * 0.5f);
+    float vr = v_cmd + (w_cmd * L * 0.5f);
+
+    float max_vel = fmax(fabs(vl), fabs(vr));
+    if (max_vel > VEL_MAX_LIN) {
+        float scale = VEL_MAX_LIN / max_vel;
+        vl *= scale;
+        vr *= scale;
+    }
+
+    left_velocity_target  = vl;
+    right_velocity_target = vr;
+
+    // =========================
+    // FINALIZAÇÃO
+    // =========================
+    bool reached_position = (distance < precision);
+    bool reached_heading  = (!use_heading || fabs(final_error) < 0.05f);
+
+    if (reached_position && reached_heading)
+    {
+        left_velocity_target = 0.0f;
+        right_velocity_target = 0.0f;
+        mode = 0;
+    }
+}
 
 
-void DiffCar::mover_distancia(float metros, float velocidade_linear) {
+void DiffCar::mover_distancia(float centimetros, float velocidade_linear) {
     float x_inicial = odom_real.x;
     float y_inicial = odom_real.y;
     float ang_inicial = odom_real.theta; // Usa a IMU como referência de rumo (Yaw)
     
-    // Converte a intenção linear baseada no parâmetro positivo/negativo "metros"
-    float dist_alvo = fabs(metros);
-    float vel = (metros < 0.0f) ? -fabs(velocidade_linear) : fabs(velocidade_linear);
+    // Converte a intenção linear baseada no parâmetro positivo/negativo "centimetros"
+    float dist_alvo = fabs(centimetros);
+    float vel = (centimetros < 0.0f) ? -fabs(velocidade_linear) : fabs(velocidade_linear);
     
     float dist_percorrida = 0.0f;
     
@@ -224,12 +451,12 @@ void DiffCar::mover_distancia(float metros, float velocidade_linear) {
         // para dar espaço à frenagem e evitar "skipping" sobre o ponto alvo
         float vel_calc = vel;
         float erro_dist = dist_alvo - dist_percorrida;
-        if (erro_dist < 0.15f) {
-            vel_calc = vel * (erro_dist / 0.15f);
+        if (erro_dist < 15.0f) {
+            vel_calc = vel * (erro_dist / 15.0f);
             
             // Garante que não zera de vez e não tenha força para rolar a bucha do pneu, travando no caminho
-            if (fabs(vel_calc) < 0.15f) {
-                vel_calc = copysign(0.15f, vel); 
+            if (fabs(vel_calc) < 15.0f) {
+                vel_calc = copysign(15.0f, vel); 
             }
         }
         
@@ -269,7 +496,7 @@ void DiffCar::manter_rumo(float velocidade_linear, float angulo_desejado) {
     w_correcao = constrain(w_correcao, -VEL_MAX_ANG, VEL_MAX_ANG);
 
     // 5. Mixagem nos motores (Cinemática Diferencial)
-    float L = WHEEL_BASE_M;
+    float L = WHEEL_BASE_CM;
     left_velocity_target  = velocidade_linear - (w_correcao * L * 0.5f);
     right_velocity_target = velocidade_linear + (w_correcao * L * 0.5f);
 

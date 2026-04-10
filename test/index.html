@@ -18,27 +18,9 @@
 </head>
 <body>
 
-<div id="ui">
-    <h2>Status do Robo</h2>
-    <p>MQTT: <span id="mqtt_status" style="color: red;">Desconectado</span></p>
-    <p>X: <span id="val_x">0.00</span> | Y: <span id="val_y">0.00</span></p>
-    <p>Theta: <span id="val_t">0.00</span> rad</p>
-    <hr>
-    <h3>Motores (m/s)</h3>
-    <p>Esq: <span id="val_vl">0.00</span> | Alvo Esq: <span id="val_vlt">0.00</span></p>
-    <p>Dir: <span id="val_vr">0.00</span> | Alvo Dir: <span id="val_vrt">0.00</span></p>
-    <hr>
-    <h3>IMU</h3>
-    <p>Accel (g): X:<span id="val_ax">0</span> Y:<span id="val_ay">0</span> Z:<span id="val_az">0</span></p>
-    <p>Gyro (°/s): X:<span id="val_gx">0</span> Y:<span id="val_gy">0</span> Z:<span id="val_gz">0</span></p>
-    <p>Yaw IMU: <span id="val_yaw">0</span> rad</p>
-</div>
+<a href="dashboard.html" target="_blank" style="position: absolute; top: 10px; left: 10px; z-index: 999; background: rgba(0,0,0,0.7); color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px; border: 1px solid #444; font-family: sans-serif;">Abrir Dashboard 📈</a>
 
-<div id="charts" style="position: absolute; top: 10px; right: 10px; width: 400px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px;">
-    <h3 style="color: white; margin-top: 0;">IMU Plot</h3>
-    <canvas id="imuChart" width="400" height="200"></canvas>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</div>
+
 
 <div id="controls">
     <button style="grid-column: 2" onclick="sendCmd('DNX=MF')">FRENTE</button>
@@ -57,6 +39,16 @@
     <small style="color: yellow; margin-top: 5px;">Dica: Você também pode Clicar<br>no chão do mapa (Grid)!</small>
 </div>
 
+<div id="path-controls" style="position: absolute; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; color: white; display: flex; flex-direction: column; gap: 5px; width: 250px;">
+    <b>Rota Multi-Pontos:</b>
+    <ul id="path_list" style="list-style-type: none; padding: 0; max-height: 100px; overflow-y: auto; margin: 5px 0; font-size: 14px;"></ul>
+    <div style="display: flex; gap: 5px;">
+        <button onclick="addPointToPath()" style="flex: 1; padding: 5px; background: #28a745; font-size: 12px;">Adicionar Ponto</button>
+        <button onclick="clearPath()" style="flex: 1; padding: 5px; background: #dc3545; font-size: 12px;">Limpar Rota</button>
+    </div>
+    <button onclick="startPath()" style="margin-top: 5px; background: #ffc107; color: black; font-size: 14px;">INICIAR ROTA</button>
+</div>
+
 <script>
     // --- CONFIGURAÇÃO MQTT ---
     // Nota: O ESP32 usa porta 1883 (TCP). O navegador EXIGE WebSockets (geralmente porta 9001 ou 15675)
@@ -65,10 +57,90 @@
     const client = mqtt.connect(broker);
 
     client.on('connect', () => {
-        document.getElementById('mqtt_status').innerText = 'Conectado';
-        document.getElementById('mqtt_status').style.color = '#0f0';
+        console.log('Conectado ao MQTT');
         client.subscribe('telemetry');
     });
+
+
+    // --- NAVEGAÇÃO MULTIPONTOS ---
+    let pathSequence = [];
+    let isFollowingPath = false;
+    let currentPointIndex = 0;
+    const DISTANCE_THRESHOLD = 0.15; // Tolerância de 15cm
+
+    function followPath(points) {
+        // points é um array de objetos: [{x: 1, y: 1}, {x: 2, y: 0}, ...]
+        pathSequence = points;
+        currentPointIndex = 0;
+        if (pathSequence.length > 0) {
+            isFollowingPath = true;
+            console.log("Iniciando rota:", pathSequence);
+            sendNavCmd(pathSequence[0].x, pathSequence[0].y, pathSequence[0].t || 0);
+        }
+    }
+
+    function checkPathProgress(currentX, currentY) {
+        if (!isFollowingPath || currentPointIndex >= pathSequence.length) return;
+
+        let target = pathSequence[currentPointIndex];
+        let dx = currentX - target.x;
+        let dy = currentY - target.y;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+
+        if (dist < DISTANCE_THRESHOLD) {
+            console.log(`Ponto ${currentPointIndex} alcançado.`);
+            currentPointIndex++;
+            if (currentPointIndex < pathSequence.length) {
+                let nextTarget = pathSequence[currentPointIndex];
+                sendNavCmd(nextTarget.x, nextTarget.y, nextTarget.t || 0);
+            } else {
+                console.log("Destino final alcançado!");
+                isFollowingPath = false;
+                clearPath(); // Limpa as configurações globais da UI
+            }
+        }
+    }
+
+    // --- CONTROLES DE ROTA DA UI ---
+    let userPathSequence = [];
+
+    function addPointToPath() {
+        let x = parseFloat(document.getElementById('inp_x').value);
+        let y = parseFloat(document.getElementById('inp_y').value);
+        let t = parseFloat(document.getElementById('inp_t').value);
+        userPathSequence.push({x: x, y: y, t: t});
+        updatePathUI();
+    }
+
+    function clearPath() {
+        userPathSequence = [];
+        updatePathUI();
+    }
+
+    function updatePathUI() {
+        const list = document.getElementById('path_list');
+        list.innerHTML = '';
+        if (userPathSequence.length === 0) {
+            list.innerHTML = '<li style="color: #aaa;">Rota vazia</li>';
+        } else {
+            userPathSequence.forEach((p, index) => {
+                let li = document.createElement('li');
+                li.innerText = `P${index + 1} -> X:${p.x.toFixed(2)} | Y:${p.y.toFixed(2)} | θ:${p.t.toFixed(2)}`;
+                list.appendChild(li);
+            });
+        }
+    }
+
+    function startPath() {
+        if (userPathSequence.length > 0) {
+            followPath([...userPathSequence]);
+        } else {
+            alert("A rota está vazia! Adicione pontos antes de iniciar.");
+        }
+    }
+
+    // Inicializa a UI vazia
+    updatePathUI();
 
     function sendCmd(cmd) {
         client.publish('cmd', cmd);
@@ -78,8 +150,8 @@
     function sendNavCmd(x, y, theta) {
         // Se chamado sem parametros, pega os valores da caixinha (Inputs HTML)
         if(x === undefined) {
-             x = parseFloat(document.getElementById('inp_x').value);
-             y = parseFloat(document.getElementById('inp_y').value);
+             x = parseFloat(document.getElementById('inp_x').value*100); // Converte para cm
+             y = parseFloat(document.getElementById('inp_y').value*100); // Converte para cm
              theta = parseFloat(document.getElementById('inp_t').value);
         }
         
@@ -240,79 +312,20 @@
         }
     });
 
-    // --- CONFIGURAÇÃO DO GRÁFICO (CHART.JS) ---
-    const ctx = document.getElementById('imuChart').getContext('2d');
-    const maxDataPoints = 50;
-    const imuChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: Array(maxDataPoints).fill(''),
-            datasets: [
-                { label: 'Accel X', borderColor: 'red', data: [], fill: false, borderWidth: 1, pointRadius: 0 },
-                { label: 'Accel Y', borderColor: 'green', data: [], fill: false, borderWidth: 1, pointRadius: 0 },
-                { label: 'Accel Z', borderColor: 'blue', data: [], fill: false, borderWidth: 1, pointRadius: 0 }
-            ]
-        },
-        options: {
-            responsive: true,
-            animation: false,
-            scales: { y: { suggestedMin: -2, suggestedMax: 2 } },
-            plugins: {
-                legend: { labels: { color: 'white' } }
-            }
-        }
-    });
-
-    // --- ATUALIZAÇÃO DE TELEMETRIA ---
+// --- ATUALIZAÇÃO DE TELEMETRIA ---
     client.on('message', (topic, message) => {
         if (topic === 'telemetry') {
             const data = JSON.parse(message.toString());
-            
-            // Atualiza UI Texto
-            document.getElementById('val_x').innerText = data.x.toFixed(2);
-            document.getElementById('val_y').innerText = data.y.toFixed(2);
-            document.getElementById('val_t').innerText = data.theta.toFixed(2);
-            document.getElementById('val_ax').innerText = data.accel_x.toFixed(2);
-            document.getElementById('val_ay').innerText = data.accel_y.toFixed(2);
-            document.getElementById('val_az').innerText = data.accel_z.toFixed(2);
-            document.getElementById('val_gx').innerText = data.gyro_x.toFixed(1);
-            document.getElementById('val_gy').innerText = data.gyro_y.toFixed(1);
-            document.getElementById('val_gz').innerText = data.gyro_z.toFixed(1);
-            document.getElementById('val_yaw').innerText = data.yaw_imu.toFixed(2);
-            document.getElementById('val_vlt').innerText = data.left_vel_target !== undefined ? data.left_vel_target.toFixed(2) : "0.00";
-            document.getElementById('val_vrt').innerText = data.right_vel_target !== undefined ? data.right_vel_target.toFixed(2) : "0.00";
-
-            // Atualiza o gráfico de acceleração
-            imuChart.data.datasets[0].data.push(data.accel_x);
-            imuChart.data.datasets[1].data.push(data.accel_y);
-            imuChart.data.datasets[2].data.push(data.accel_z);
-
-            // Remove antigos
-            if (imuChart.data.datasets[0].data.length > maxDataPoints) {
-                imuChart.data.datasets[0].data.shift();
-                imuChart.data.datasets[1].data.shift();
-                imuChart.data.datasets[2].data.shift();
-            }
-            imuChart.update();
-
-            // Atualiza Posição 3D
-            // Invertemos o Y/Z dependendo da convenção da sua odometria
+            checkPathProgress(data.x, data.y);
             carGroup.position.x = data.x;
-            carGroup.position.z = -data.y; // Inversão comum em 3D
-            // Subtrai-se 90 graus (PI/2) para corrigir o offset do modelo 3D
+            carGroup.position.z = -data.y;
             carGroup.rotation.y = data.theta + (Math.PI / 2); 
-            
-            // Atualiza o ArrowHelper (Acelerômetro)
-            // Relativo ao grupo do carro: Z é frente, X é lado, Y é cima
             const imuVec = new THREE.Vector3(-data.accel_y, data.accel_z, data.accel_x);
             const imuLen = imuVec.length();
             if(imuLen > 0.05) {
                 imuArrowHelp.setDirection(imuVec.normalize());
                 imuArrowHelp.setLength(imuLen * 0.5, 0.1, 0.05);
             }
-
-            // Ajustamos o OrbitControls para seu Ponto Central (Foco) ser sempre no robô em movimento
-            // Como não travaremos mais a position XYZ, a câmera acompanhará livremente
             controls.target.set(data.x, 0, -data.y);
             controls.update();
         }

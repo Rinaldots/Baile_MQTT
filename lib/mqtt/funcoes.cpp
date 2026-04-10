@@ -1,6 +1,6 @@
 #include "diff_car.h"
 #include "mqtt.h"
-#define COMUM_SPEED 0.2f
+#define COMUM_SPEED 30.0f
 
 static double wrapAngleD(double a) {
   while (a > M_PI) a -= 2.0 * M_PI;

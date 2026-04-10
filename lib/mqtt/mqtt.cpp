@@ -1,9 +1,14 @@
 #include "mqtt.h"
 #include "diff_car.h"
+#include <QuickPID.h>
 #include "network_config.h"
+#include <Preferences.h>
 #include <Arduino.h>
 #include <cstring>
 #define DEBUG_MQTT
+
+extern QuickPID left_pid;
+extern QuickPID right_pid;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -43,6 +48,7 @@ bool MqttTask::reconnect() {
       MQTT_Connected = true;
       Serial.println("connected");
       client.subscribe("cmd");
+      client.subscribe("/parametros");
     }else{
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -67,6 +73,34 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
   // Build a safe String from payload (messageTemp already contains it)
   messageTemp.trim(); // remove trailing newline/carriage returns
   String mensagem = messageTemp;
+
+  if (String(topic) == "/parametros") {
+      // Formato esperado: Ke:1.0 Kde:1.0 Kout:1.0 MaxInc:0.025
+      float Kp_left, Ki_left, Kd_left, Kp_right, Ki_right, Kd_right;
+
+      int idx;
+      if ((idx = mensagem.indexOf("Kp_left:")) >= 0) Kp_left = mensagem.substring(idx + 8).toFloat();
+      if ((idx = mensagem.indexOf("Ki_left:")) >= 0) Kd_left = mensagem.substring(idx + 8).toFloat();
+      if ((idx = mensagem.indexOf("Kd_left:")) >= 0) Kp_right = mensagem.substring(idx + 9).toFloat();
+      if ((idx = mensagem.indexOf("Kp_right:")) >= 0) Kp_left = mensagem.substring(idx + 9).toFloat();
+      if ((idx = mensagem.indexOf("Ki_right:")) >= 0) Kp_right = mensagem.substring(idx + 9).toFloat();
+      if ((idx = mensagem.indexOf("Kd_right:")) >= 0) Kd_right = mensagem.substring(idx + 9).toFloat();
+
+      Preferences prefs;
+      prefs.begin("fuzzy", false);
+      prefs.putFloat("Kp_left", Kp_left);
+      prefs.putFloat("Ki_left", Ki_left);
+      prefs.putFloat("Kd_left", Kd_left);
+      prefs.putFloat("Kp_right", Kp_right);
+      prefs.putFloat("Ki_right", Ki_right);
+      prefs.putFloat("Kd_right", Kd_right);
+      prefs.end();
+
+      left_pid.SetTunings(Kp_left, Ki_left, Kd_left);
+      right_pid.SetTunings(Kp_right, Ki_right, Kd_right);
+      Serial.printf("Parametros Fuzzy Atualizados: Kp_left=%.3f Kd_left=%.3f Kp_right=%.3f Kd_right=%.3f\n", Kp_left, Kd_left, Kp_right, Kd_right);
+      return;
+  }
 
   // Defensive checks before indexing
   if (mensagem.length() >= 3 && mensagem[0] == 'D' && mensagem[1] == 'N' && mensagem[2] == 'X') {
@@ -173,12 +207,12 @@ void MqttTask::updateTelemetry() {
   }
   // Exemplo de publicação de telemetria
   String telemetry = "{";
-  telemetry += "\"left_velocity_ms\":" + String(diffCar.left_velocity_ms) + ",";
-  telemetry += "\"right_velocity_ms\":" + String(diffCar.right_velocity_ms) + ",";
-  telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
-  telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
-  telemetry += "\"x\":" + String(diffCar.odom_real.x) + ",";
-  telemetry += "\"y\":" + String(diffCar.odom_real.y) + ",";
+    telemetry += "\"left_velocity_cms\":" + String(diffCar.left_velocity_cms) + ",";
+    telemetry += "\"right_velocity_cms\":" + String(diffCar.right_velocity_cms) + ",";
+    telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
+    telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
+  telemetry += "\"x\":" + String(diffCar.odom_real.x/100.0) + ",";
+  telemetry += "\"y\":" + String(diffCar.odom_real.y/100.0) + ",";
   telemetry += "\"theta\":" + String(diffCar.odom_real.theta) + ",";
   telemetry += "\"accel_x\":" + String(diffCar.accel_d[0]) + ",";
   telemetry += "\"accel_y\":" + String(diffCar.accel_d[1]) + ",";
@@ -189,5 +223,14 @@ void MqttTask::updateTelemetry() {
   telemetry += "\"yaw_imu\":" + String(diffCar.ypr_d[0]);
   telemetry += "}";
   publish("telemetry", telemetry.c_str());
+
+  static unsigned long last_param_pub = 0;
+  if (millis() - last_param_pub >= 3000) {
+    last_param_pub = millis();
+    String params = "Kp:" + String(left_pid.GetKp()) + 
+                    " Ki:" + String(left_pid.GetKi()) + 
+                    " Kd:" + String(left_pid.GetKd());
+    publish("/parametros/atuais", params.c_str());
+  }
 }
 

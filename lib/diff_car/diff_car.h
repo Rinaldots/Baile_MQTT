@@ -44,8 +44,8 @@ public:
     int left_motor_dir  = 1;
     int right_motor_dir = 1;
 
-    float min_pwm_left = 35.0f;
-    float min_pwm_right = 35.0f;
+    float min_pwm_left = 771.0f;
+    float min_pwm_right = 771.0f;
 
     // ============================
     // Encoder → PCNT MODE
@@ -73,8 +73,8 @@ public:
     // ============================
     // RESULTADO — Velocidade estimada
     // ============================
-    float left_velocity_ms  = 0.0f;
-    float right_velocity_ms = 0.0f;
+    float left_velocity_cms  = 0.0f;
+    float right_velocity_cms = 0.0f;
 
     // Velocidade alvo (m/s)
     float left_velocity_target  = 0.0f;
@@ -93,6 +93,10 @@ public:
     double target_x = 0.0;
     double target_y = 0.0;
     double target_theta = 0.0;
+
+    // Recovery / Anti-Colisão
+    unsigned long last_shock_time = 0;
+    bool in_recovery = false;
 
     // ============================
     void setup();
@@ -127,14 +131,24 @@ public:
     // Odometry functions
     Odometry odom_enc;
     Odometry odom_real;
-    void encoder_odometry_update();
+    
+    // roda esquerda
+    float left_kalman_x = 0.0f;
+    float left_kalman_P = 1.0f;
 
+    // roda direita
+    float right_kalman_x = 0.0f;
+    float right_kalman_P = 1.0f;
+    void encoder_odometry_update();
+    float kalman_update(float measurement, float &x, float &P);
+    
     // Navigation functions
-    void navigate_to(float target_x, float target_y, float target_theta, float precision, float target_velocity);
+    //void navigate_to(float target_x, float target_y, float target_theta, float precision, float target_velocity);
+    void navigate_to_target_pure_pursuit(float target_x, float target_y, float target_theta, float precision, float target_velocity);
     void navigate_delta(float delta_x, float delta_y, float delta_theta);
     void debug_nav();
     void manter_rumo(float velocidade_linear, float angulo_desejado);
-    void mover_distancia(float metros, float velocidade_linear = 0.3f);
+    void mover_distancia(float centimetros, float velocidade_linear = 30.0f);
 };
 
 extern DiffCar diffCar;

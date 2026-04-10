@@ -42,6 +42,7 @@ void setup() {
 
 	diffCar.update_leds(1,1,0,0,0,0,0,0);
 	Serial.println("Setup complete. BLE task running on Core 0");
+    //diffCar.calibrate_motors_inertia();
 }
 
 
@@ -50,6 +51,7 @@ void loop() {
     static unsigned long lastFast = 0;
     static unsigned long lastNav = 0;
     static unsigned long last1s = 0;
+    static unsigned long lastMqtt = 0;
     unsigned long now = micros();
     
     // ============================
@@ -57,9 +59,13 @@ void loop() {
     // ============================
     if (now - lastFast >= LOOP_FAST_US) { 
         lastFast = now;
-        diffCar.velocity_update();
-        diffCar.encoder_odometry_update();
+        
         diffCar.handler_motor();
+
+        if(diffCar.mode == 1){
+			// Alvo XY e angulo | Tolerância coordenada | Velocidade Linear escalar
+			diffCar.navigate_to_target_pure_pursuit(diffCar.target_x, diffCar.target_y, NAN, 15.0f, 25.0f);
+		}
     }
 
     // ============================
@@ -67,17 +73,16 @@ void loop() {
     // ============================
     if (now - lastNav >= LOOP_NAV_US) {
 		lastNav = now;
-		
-		mqtt.handler();
-		
+		diffCar.velocity_update();
+        diffCar.encoder_odometry_update();
         //diffCar.debug_encoder();
+    }
 
+    if (now - lastMqtt >= LOOP_MQTT_US) {
+        lastMqtt = now;
+
+        mqtt.handler();
 		mqtt.updateTelemetry();
-
-		if(diffCar.mode == 1){
-			// Alvo XY e angulo | Tolerância coordenada | Velocidade Linear escalar
-			diffCar.navigate_to(diffCar.target_x, diffCar.target_y, diffCar.target_theta, 0.1f, 0.40f);
-		}
     }
     // ============================
     //        1 Hz

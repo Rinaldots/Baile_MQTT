@@ -12,107 +12,123 @@
 
 
 void DiffCar::setup_encoder() {
-    // 1. Configure GPIOs (Explicitly)
-    // Ensure you are NOT using GPIO 34-39 unless you have external pull-ups!
     pinMode(ENCODER_A_1, INPUT_PULLUP);
     pinMode(ENCODER_B_1, INPUT_PULLUP);
 
-    // --- LEFT UNIT SETUP ---
+    // ── LEFT ─────────────────────────────────────────────────────
     pcnt_config_t left = {};
-    left.unit = PCNT_LEFT_UNIT;
-    left.channel = PCNT_CHANNEL_0;
+    left.unit           = PCNT_LEFT_UNIT;
+    left.channel        = PCNT_CHANNEL_0;
     left.pulse_gpio_num = ENCODER_A_1;
-    left.ctrl_gpio_num = PCNT_PIN_NOT_USED;
-    
-    // CHANGE: Count on both edges for higher resolution and better detection
-    left.pos_mode = PCNT_COUNT_INC; // Count up on rising
-    left.neg_mode = PCNT_COUNT_INC; // Count up on falling
-    
+    left.ctrl_gpio_num  = PCNT_PIN_NOT_USED;
+
+    // Chave óptica 1 canal: conta só borda de SUBIDA
+    // (cada furo/dente passa = 1 pulso, sem dobrar a contagem)
+    left.pos_mode  = PCNT_COUNT_INC;  // sobe na rising edge
+    left.neg_mode  = PCNT_COUNT_DIS;  // ignora falling edge
+
     left.lctrl_mode = PCNT_MODE_KEEP;
     left.hctrl_mode = PCNT_MODE_KEEP;
     left.counter_h_lim = PCNT_H_LIM;
     left.counter_l_lim = PCNT_L_LIM;
-
     pcnt_unit_config(&left);
 
-    // Filter: 100 cycles at 80MHz is ~1.25us. 
-    // If you have a noisy mechanical switch, increase to 1000. 
-    // If optical, 100 is fine.
-    pcnt_set_filter_value(PCNT_LEFT_UNIT, 1000); 
+    // Chave óptica: 100–300 ciclos (1.25–3.75μs) é suficiente
+    // 1000 ciclos (12.5μs) pode perder pulsos acima de ~40kHz
+    pcnt_set_filter_value(PCNT_LEFT_UNIT, 500);
     pcnt_filter_enable(PCNT_LEFT_UNIT);
 
-    // Clear and Start
     pcnt_counter_pause(PCNT_LEFT_UNIT);
     pcnt_counter_clear(PCNT_LEFT_UNIT);
     pcnt_counter_resume(PCNT_LEFT_UNIT);
 
-
-    // --- RIGHT UNIT SETUP ---
-    pcnt_config_t right = left; // Copy config
-    right.unit = PCNT_RIGHT_UNIT;
-    right.pulse_gpio_num = ENCODER_B_1; // Assign Right Pin
-
+    // ── RIGHT ────────────────────────────────────────────────────
+    pcnt_config_t right = left;
+    right.unit           = PCNT_RIGHT_UNIT;
+    right.pulse_gpio_num = ENCODER_B_1;
     pcnt_unit_config(&right);
-    
-    pcnt_set_filter_value(PCNT_RIGHT_UNIT, 1000);
+
+    pcnt_set_filter_value(PCNT_RIGHT_UNIT, 500);
     pcnt_filter_enable(PCNT_RIGHT_UNIT);
-    
+
     pcnt_counter_pause(PCNT_RIGHT_UNIT);
     pcnt_counter_clear(PCNT_RIGHT_UNIT);
     pcnt_counter_resume(PCNT_RIGHT_UNIT);
 
-    // Take initial snapshot
-    pcnt_get_counter_value(PCNT_LEFT_UNIT, &left_count_snapshot);
+    pcnt_get_counter_value(PCNT_LEFT_UNIT,  &left_count_snapshot);
     pcnt_get_counter_value(PCNT_RIGHT_UNIT, &right_count_snapshot);
 
-    Serial.println("PCNT encoders initialized (Double Edge Mode).");
+    Serial.println("PCNT encoders initialized (Single Edge, optical sensor).");
 }
 
+// ── Kalman 1D com ganho adequado para velocidade ─────────────────────────
+// Q: quanto a velocidade pode mudar entre amostras (dinâmica do robô)
+// R: ruído do sensor (chave óptica é limpa, mas tem quantização)
+float DiffCar::kalman_update(float measurement, float &x, float &P) {
+    const float Q = 50.0f;   // aceita mudanças rápidas de velocidade
+    const float R = 2000.0f;   // chave óptica tem pouco ruído (R/Q = 3x)
 
+    float P_pred = P + Q;
+    float K      = P_pred / (P_pred + R);
 
+    x = x + K * (measurement - x);
+    P = (1.0f - K) * P_pred;
+
+    return x;
+}
 
 void DiffCar::velocity_update() {
-
     unsigned long now_us = micros();
-    // Usa tempo configurado globalmente para sincronizar com o Main Loop
-    const unsigned long window_us = LOOP_FAST_US; 
-    if (now_us - last_vel_update_us < window_us) return;
-    unsigned long dt = now_us - last_vel_update_us;
-    last_vel_update_us = now_us;
+    if (now_us - last_vel_update_us < LOOP_FAST_US) return;
 
-    int16_t left_now = 0;
+    unsigned long dt_us = now_us - last_vel_update_us;
+    last_vel_update_us  = now_us;
+    float dt = dt_us * 1e-6f;
+
+    int16_t left_now  = 0;
     int16_t right_now = 0;
-    
     pcnt_get_counter_value(PCNT_LEFT_UNIT,  &left_now);
     pcnt_get_counter_value(PCNT_RIGHT_UNIT, &right_now);
 
-    int16_t dleft = left_now - left_count_snapshot;
+    int16_t dleft  = left_now  - left_count_snapshot;
     int16_t dright = right_now - right_count_snapshot;
-
-    left_count_snapshot = left_now;
+    left_count_snapshot  = left_now;
     right_count_snapshot = right_now;
 
-    float left_freq  = (float)dleft  * 1e6f / dt;
-    float right_freq = (float)dright * 1e6f / dt;
+    // Pulsos/s (sempre positivo — direção vem do motor_dir)
+    float left_freq  = fabsf((float)dleft  / dt);
+    float right_freq = fabsf((float)dright / dt);
 
-    // EMA filter (Aprimorada para menor retenção de passado)
-    const float alpha = 0.35f;
+    // ── Anti-spike ───────────────────────────────────────────────
+    // Limita variação máxima entre amostras
+    const float max_delta = 1500.0f; // pulsos/s — ajuste se necessário
+    left_freq  = constrain(left_freq,
+                           left_freq_filtered  - max_delta,
+                           left_freq_filtered  + max_delta);
+    right_freq = constrain(right_freq,
+                           right_freq_filtered - max_delta,
+                           right_freq_filtered + max_delta);
 
-    left_freq_filtered  = (1 - alpha) * left_freq_filtered  + alpha * left_freq;
-    right_freq_filtered = (1 - alpha) * right_freq_filtered + alpha * right_freq;
+    // ── Kalman ───────────────────────────────────────────────────
+    left_freq_filtered  = kalman_update(left_freq,  left_kalman_x,  left_kalman_P);
+    right_freq_filtered = kalman_update(right_freq, right_kalman_x, right_kalman_P);
 
-    if (left_freq_filtered < MIN_PULSES) left_freq_filtered = 0;
-    if (right_freq_filtered < MIN_PULSES) right_freq_filtered = 0;
+    // ── Deadzone (parado real) ───────────────────────────────────
+    if (left_freq_filtered  < MIN_PULSES) left_freq_filtered  = 0.0f;
+    if (right_freq_filtered < MIN_PULSES) right_freq_filtered = 0.0f;
 
-    left_velocity_ms  = left_freq_filtered  * METER_PER_PULSE;
-    right_velocity_ms = right_freq_filtered * METER_PER_PULSE;
+    // ── Conversão para m/s com sinal de direção ──────────────────
+    // A chave óptica não detecta direção — usamos o comando do motor
+    left_velocity_cms  = left_freq_filtered  * CENTIMETER_PER_PULSE
+                        * (left_motor_dir  ? 1.0f : -1.0f);
+    right_velocity_cms = right_freq_filtered * CENTIMETER_PER_PULSE
+                        * (right_motor_dir ? 1.0f : -1.0f);
 }
-
 
 void DiffCar::debug_encoder() {
       Serial.print("encoder Left: "); Serial.println(diffCar.left_count_snapshot);
-      Serial.print("LV (m/s): ");
-      Serial.print(left_velocity_ms, 2);
+      Serial.print("LV (cm/s): ");
+      Serial.print(left_velocity_cms, 2);
       Serial.print("Target LV: ");
       Serial.print(left_velocity_target, 2);
       Serial.print("| Lp: ");
