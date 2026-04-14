@@ -8,14 +8,14 @@
 #define VEL_MIN_LIN 15.0f  // cm/s
 #define VEL_MAX_LIN 60.0f   // cm/s
 
-#define VEL_MIN_ANG 1.5f   // rad/s (vel min de 15 cm/s nas rodas p/ girar)
-#define VEL_MAX_ANG 4.0f   // rad/s (vel máx de 30 cm/s nas rodas)
+#define VEL_MIN_ANG 0.5f   // rad/s (vel min de 15 cm/s nas rodas p/ girar)
+#define VEL_MAX_ANG 2.0f   // rad/s (vel máx de 30 cm/s nas rodas)
 
 // Frequências de Atualização e Timers
 #define MPU_TASK_MS     5       // 200 Hz (Tick do RTOS para a IMU)
-#define LOOP_FAST_US    10000UL  // 100 Hz 
+#define LOOP_FAST_US    5000UL  // 200 Hz 
 #define LOOP_NAV_US     20000UL //  50 Hz 
-#define LOOP_MQTT_US    20000UL     // Se não receber pulso do encoder em 500ms, considera parado
+#define LOOP_MQTT_US    20000UL //  50 Hz 
 #define C1 -2.47122952e-05
 #define C2 1.22241432e-02
 #define C3 -1.04095195e+00

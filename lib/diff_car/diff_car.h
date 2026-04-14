@@ -43,7 +43,7 @@ public:
     float right_motor_pwm = 0.0f;
     int left_motor_dir  = 1;
     int right_motor_dir = 1;
-
+    bool tuning_mode = false; // flag para auto-tune
     float min_pwm_left = 771.0f;
     float min_pwm_right = 771.0f;
 
@@ -64,10 +64,6 @@ public:
     // Tempo do último cálculo de velocidade
     unsigned long last_vel_update_us = 0;
 
-    // thresholds / filtros
-    static constexpr float HYST_UP   = 0.25f;
-    static constexpr float HYST_DOWN = 0.15f;
-    static constexpr unsigned long TIMEOUT_MS = 200;
     static constexpr float MIN_PULSES = 0.5f;
 
     // ============================
@@ -82,7 +78,7 @@ public:
 
     float abs_left_velocity_target  = 0.0f;
     float abs_right_velocity_target = 0.0f;
-
+    
     float left_pid_output  = 0.0f;
     float right_pid_output = 0.0f;
 
@@ -94,15 +90,10 @@ public:
     double target_y = 0.0;
     double target_theta = 0.0;
 
-    // Recovery / Anti-Colisão
-    unsigned long last_shock_time = 0;
-    bool in_recovery = false;
-
     // ============================
     void setup();
 
     // Setup functions
-    void setup_encoder_hall();
     void setup_encoder();
     void setup_h_bridge();
     void setup_mpu();
@@ -110,11 +101,9 @@ public:
     // H-Bridge functions
     void update_h_bridge();
     void set_motor_speed(float left_motor_pwm, float right_motor_pwm);
-    void set_motor_speed_ms(float vel_left, float vel_right);
     void handler_motor();
-    MotorPwmResult set_motor_speed_msr(float vel_left, float vel_right);
     void calibrate_motors_inertia();
-
+    void auto_tune_pid();
     // Encoder functions
     void debug_encoder();
     void velocity_update();
@@ -139,13 +128,13 @@ public:
     // roda direita
     float right_kalman_x = 0.0f;
     float right_kalman_P = 1.0f;
+
     void encoder_odometry_update();
     float kalman_update(float measurement, float &x, float &P);
     
     // Navigation functions
     //void navigate_to(float target_x, float target_y, float target_theta, float precision, float target_velocity);
     void navigate_to_target_pure_pursuit(float target_x, float target_y, float target_theta, float precision, float target_velocity);
-    void navigate_delta(float delta_x, float delta_y, float delta_theta);
     void debug_nav();
     void manter_rumo(float velocidade_linear, float angulo_desejado);
     void mover_distancia(float centimetros, float velocidade_linear = 30.0f);

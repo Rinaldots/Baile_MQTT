@@ -42,7 +42,10 @@ void setup() {
 
 	diffCar.update_leds(1,1,0,0,0,0,0,0);
 	Serial.println("Setup complete. BLE task running on Core 0");
-    //diffCar.calibrate_motors_inertia();
+    
+    //diffCar.tuning_mode = true;
+    //diffCar.auto_tune_pid();
+    //diffCar.tuning_mode = false;
 }
 
 
@@ -57,40 +60,32 @@ void loop() {
     // ============================
     //        Malha Rápida (Cinemática e Motores)
     // ============================
-    if (now - lastFast >= LOOP_FAST_US) { 
-        lastFast = now;
-        
-        diffCar.handler_motor();
+    if (!diffCar.tuning_mode) {
+        if (now - lastFast >= LOOP_FAST_US) { 
+            lastFast = now;
+            diffCar.velocity_update();
+            diffCar.debug_encoder();
+            diffCar.encoder_odometry_update();
+            diffCar.handler_motor();
+            if(diffCar.mode == 1){
+                // Alvo XY e angulo | Tolerância coordenada | Velocidade Linear escalar
+                diffCar.navigate_to_target_pure_pursuit(diffCar.target_x, diffCar.target_y, NAN, 15.0f, 25.0f);
+            }
+        }
 
-        if(diffCar.mode == 1){
-			// Alvo XY e angulo | Tolerância coordenada | Velocidade Linear escalar
-			diffCar.navigate_to_target_pure_pursuit(diffCar.target_x, diffCar.target_y, NAN, 15.0f, 25.0f);
-		}
-    }
-
-    // ============================
-    //        Malha de Navegação (Navegação PID e MQTT)
-    // ============================
-    if (now - lastNav >= LOOP_NAV_US) {
-		lastNav = now;
-		diffCar.velocity_update();
-        diffCar.encoder_odometry_update();
-        //diffCar.debug_encoder();
-    }
-
-    if (now - lastMqtt >= LOOP_MQTT_US) {
-        lastMqtt = now;
-
-        mqtt.handler();
-		mqtt.updateTelemetry();
-    }
-    // ============================
-    //        1 Hz
-    // ============================
-    if(now - last1s >= 1000000) { // 1 Hz = 1 s
-        last1s = now;
-        
-        diffCar.led_rotate();
+        if (now - lastMqtt >= LOOP_MQTT_US) {
+            lastMqtt = now;
+            mqtt.handler();
+            mqtt.updateTelemetry();
+        }
+        // ============================
+        //        1 Hz
+        // ============================
+        if(now - last1s >= 1000000) { // 1 Hz = 1 s
+            last1s = now;
+            
+            diffCar.led_rotate();
+        }
     }
 }
 

@@ -20,6 +20,9 @@ void DiffCar::setup() {
   update_leds(0,1,0,1,0,1,0,1);
 }
 
+
+
+
 void DiffCar::encoder_odometry_update() {
     static unsigned long last_odom_time = micros();
     unsigned long current_time = micros();
@@ -96,24 +99,19 @@ void DiffCar::encoder_odometry_update() {
             if(i == j) P_pred[i][j] += Q[i];        // Soma Ruído de Processo
         }
 
-    // 2. ATUALIZAÇÃO (Update Step)
-    // Se o robô bateu, invalidamos temporariamente o encoder (patinando/girando falso)
-    float R_encoder = R[1];
-    if (in_recovery) {
-        R_encoder = 100000.0f; // Incerteza altíssima na roda
-    }
-
+    
     // Inovação y = Z - H*X_pred
     float y_inov[2];
     y_inov[0] = wrapAngleD(ypr_d[0] - X_pred[2]); 
     y_inov[1] = v - X_pred[3];                    
+
 
     // Covariância da Inovação: S = H * P_pred * H^T + R
     float S[2][2];
     S[0][0] = P_pred[2][2] + R[0];
     S[0][1] = P_pred[2][3];
     S[1][0] = P_pred[3][2];
-    S[1][1] = P_pred[3][3] + R_encoder;
+    S[1][1] = P_pred[3][3];
 
     // Inversa de S (S_inv)
     float det = S[0][0]*S[1][1] - S[0][1]*S[1][0];
@@ -166,102 +164,11 @@ void DiffCar::encoder_odometry_update() {
     odom_real.linear_velocity = X_k[3];
 }
 
-
-void DiffCar::navigate_delta(float delta_x, float delta_y, float delta_theta) 
-{
-    this->target_x = odom_real.x + delta_x;
-    this->target_theta = odom_real.theta + delta_theta;
-}
-/*
-void DiffCar::navigate_to(float target_x, float target_y, float target_theta,
-                          float precision, float target_velocity)
-{
-    float dx = target_x - odom_real.x;
-    float dy = target_y - odom_real.y;
-    float distance = sqrt(dx * dx + dy * dy);
-
-    float current_w = odom_enc.angular_velocity; 
-
-    // Fase 1: Chegar no X,Y (distância < precisão)
-    // Se chegou na coordenada, Fase 2: Girar no próprio eixo pro ângulo final (target_theta)
-    if (distance < precision)
-    {
-        float final_angle_error = wrapAngleD(target_theta - odom_real.theta);
-        
-        float Kp_rot = 2.0f; 
-        float Kd_rot = 0.2f; 
-        float w = (Kp_rot * final_angle_error) - (Kd_rot * current_w);
-        
-        // Garante torque mínimo se travar
-        if (fabs(final_angle_error) > 0.04f && fabs(w) < VEL_MIN_ANG)
-            w = copysign(VEL_MIN_ANG, w);
-            
-        w = constrain(w, -VEL_MAX_ANG, VEL_MAX_ANG);
-        
-        float L = WHEEL_BASE_CM;
-        left_velocity_target  = -w * L * 0.5f;
-        right_velocity_target =  w * L * 0.5f;
-
-        // Se alinhou perfeitamente, desliga e finaliza modo de navegação
-        if (fabs(final_angle_error) < 0.1f) {
-            left_velocity_target = 0.0f;
-            right_velocity_target = 0.0f;
-            diffCar.mode = 0; 
-        }
-        return;
-    }
-
-    // Calcula o rumo até a posição (vetor XY rumo ao Target)
-    float path_angle = atan2(dy, dx);
-    float angle_error = wrapAngleD(path_angle - odom_real.theta);
-    
-    // Controle polar suave (Trajetória Aprimorada)
-    // A velocidade linear é atenuada de forma contínua pelo alinhamento angular do robô.
-    // Isso evita cortes bruscos e saltos na velocidade linear.
-    // Usando cos() focamos o movimento apenas para frente. Elevado ao cubo, o controle 
-    // "pune" o desalinhamento, priorizando girar no próprio eixo antes de avançar com tudo.
-    float alinhamento = fmax(0.0f, cosf(angle_error));
-    float v_cmd = target_velocity * tanh(distance * 2.0f) * powf(alinhamento, 3.0f);
-    
-    // Garante que se tiver distante o suficiente e bem alinhado, envia pelo menos a min lin
-    if (distance > precision && fabs(v_cmd) < VEL_MIN_LIN && alinhamento > 0.8f) {
-        v_cmd = copysign(VEL_MIN_LIN, target_velocity);
-    }
-    
-    v_cmd = constrain(v_cmd, -VEL_MAX_LIN, VEL_MAX_LIN);
-
-    // Controle Proporcional-Derivativo de Giro
-    float Kp_line = 3.5f;  
-    float Kd_line = 0.8f;  
-
-    float w_cmd = (Kp_line * angle_error) - (Kd_line * current_w);
-
-    if (fabs(angle_error) > 0.05f && fabs(w_cmd) < VEL_MIN_ANG)
-        w_cmd = copysign(VEL_MIN_ANG, w_cmd);
-
-    w_cmd = constrain(w_cmd, -VEL_MAX_ANG, VEL_MAX_ANG);
-
-    float L = WHEEL_BASE_CM;
-    float vl = v_cmd - (w_cmd * L * 0.5f);
-    float vr = v_cmd + (w_cmd * L * 0.5f);
-
-    // Normaliza velocidade se bater no limite do motor
-    float max_vel = fmax(fabs(vl), fabs(vr));
-    if (max_vel > VEL_MAX_LIN) {
-        float scale = VEL_MAX_LIN / max_vel;
-        vl *= scale;
-        vr *= scale;
-    }
-
-    left_velocity_target  = vl;
-    right_velocity_target = vr;
-}
-*/
 void DiffCar::navigate_to_target_pure_pursuit(
-    float target_x, 
-    float target_y, 
-    float target_theta,   // pode ser NAN
-    float precision, 
+    float target_x,
+    float target_y,
+    float target_theta,
+    float precision,
     float target_velocity)
 {
     float dx = target_x - odom_real.x;
@@ -269,43 +176,17 @@ void DiffCar::navigate_to_target_pure_pursuit(
     float distance = sqrt(dx * dx + dy * dy);
 
     // =========================
-    // DETECÇÃO DE IMPACTO (Anti-Colisão / Slip)
+    // FILTRO EMA NO ANGULAR VELOCITY (encoder com ruído)
     // =========================
-    // Se o acelerômetro registrar impacto > 3.0 m/s^2 (G > 0.3), robô bateu.
-    if (fabs(accel_d[1]) > 3.0f || fabs(accel_d[0]) > 3.0f) {
-        last_shock_time = millis();
-        in_recovery = true;
-    }
-
-    if (in_recovery) {
-        // Ignora a trajetória por 2.5 segundos para dar ré e girar desvencilhando
-        unsigned long t_recovery = millis() - last_shock_time;
-        if (t_recovery < 1000) {
-            // Primeiro 1s: dar ré (-20 cm/s)
-            left_velocity_target = -20.0f;
-            right_velocity_target = -20.0f;
-            return;
-        } else if (t_recovery < 2500) {
-            // De 1.0s até 2.5s: girar (-w_min) para se afastar
-            left_velocity_target = -VEL_MIN_ANG * WHEEL_BASE_CM * 0.5f;
-            right_velocity_target = VEL_MIN_ANG * WHEEL_BASE_CM * 0.5f;
-            return;
-        } else {
-            in_recovery = false; // Acabou o susto, volta a seguir do novo X/Y
-        }
-    }
-
-    float current_w = odom_enc.angular_velocity;
+    static float w_filtered = 0.0f;
+    const float ALPHA_W = 0.15f;  // mais lento = mais suave; ajuste entre 0.1..0.25
+    w_filtered = ALPHA_W * odom_enc.angular_velocity + (1.0f - ALPHA_W) * w_filtered;
 
     // =========================
-    // USO DE ORIENTAÇÃO (OPCIONAL)
+    // ORIENTAÇÃO FINAL (OPCIONAL)
     // =========================
     bool use_heading = !isnan(target_theta);
-
-    float final_error = 0.0f;
-    if (use_heading) {
-        final_error = wrapAngleD(target_theta - odom_real.theta);
-    }
+    float final_error = use_heading ? wrapAngleD(target_theta - odom_real.theta) : 0.0f;
 
     // =========================
     // LOOKAHEAD DINÂMICO
@@ -316,11 +197,9 @@ void DiffCar::navigate_to_target_pure_pursuit(
 
     if (distance < 1e-5f) distance = 1e-5f;
 
-    // ponto lookahead
     float look_x = odom_real.x + (dx / distance) * Ld;
     float look_y = odom_real.y + (dy / distance) * Ld;
 
-    // referencial do robô
     float dx_r = look_x - odom_real.x;
     float dy_r = look_y - odom_real.y;
 
@@ -333,35 +212,37 @@ void DiffCar::navigate_to_target_pure_pursuit(
     float curvature = (2.0f * y_r) / (Ld * Ld);
     curvature = constrain(curvature, -4.0f, 4.0f);
 
-    // =========================
-    // CORREÇÃO DE ORIENTAÇÃO (SÓ SE ATIVADA)
-    // =========================
     if (use_heading) {
         float heading_weight = exp(-distance * 1.5f);
-        float heading_correction = final_error * heading_weight;
-        curvature += heading_correction;
+        curvature += final_error * heading_weight;
     }
 
     // =========================
-    // VELOCIDADE LINEAR E RETA (ALINHA ANTES DE ANDAR)
+    // ÂNGULO DE CAMINHO E HISTERESE
     // =========================
-    float path_angle = atan2(dy, dx);
+    float path_angle       = atan2(dy, dx);
     float angle_error_path = wrapAngleD(path_angle - odom_real.theta);
 
-    float v_cmd = target_velocity * fmin(1.0f, distance / 50.0f);
-
-    // Se estiver desalinhado e longe, para e apenas gira no eixo
-    bool aligning_in_place = false;
-    if (distance > precision && fabs(angle_error_path) > 0.15f) {
-        v_cmd = 0.0f;
+    // Histerese estreitada: entra em 40°, SAI em 15° (evita flap entre modos)
+    static bool aligning_in_place = false;
+    if (distance > precision && fabs(angle_error_path) > 0.70f) {  // ~40°
         aligning_in_place = true;
-    } else {
-        // reduz linear em curvas normais
-        v_cmd *= 1.0f / (1.0f + fabs(curvature) * 2.5f);
+    } else if (fabs(angle_error_path) < 0.26f) {                   // ~15°
+        aligning_in_place = false;
+    }
 
-        // desaceleração perto do alvo
-        float slow_factor = distance / (precision + 0.01f);
-        slow_factor = constrain(slow_factor, 0.0f, 1.0f);
+    // =========================
+    // VELOCIDADE LINEAR
+    // =========================
+    float v_cmd = 0.0f;
+
+    if (aligning_in_place) {
+        v_cmd = 0.0f;
+    } else {
+        v_cmd = target_velocity * fmin(1.0f, distance / 50.0f);
+        v_cmd *= 1.0f / (1.0f + fabs(angle_error_path) * 2.0f);
+
+        float slow_factor = constrain(distance / (precision + 0.01f), 0.0f, 1.0f);
         v_cmd *= slow_factor;
 
         if (fabs(v_cmd) < VEL_MIN_LIN)
@@ -370,31 +251,64 @@ void DiffCar::navigate_to_target_pure_pursuit(
         v_cmd = constrain(v_cmd, -VEL_MAX_LIN, VEL_MAX_LIN);
     }
 
+    // ============================================
+    // LIMITADOR DE ACELERAÇÃO LINEAR
+    // ============================================
+    static float last_v_cmd = 0.0f;
+    static unsigned long last_accel_time = micros();
+    unsigned long now_accel = micros();
+    float dt_accel = (now_accel - last_accel_time) * 1e-6f;
+    last_accel_time = now_accel;
+
+    if (dt_accel > 0.0f && dt_accel < 0.5f) {
+        float max_dv = 50.0f * dt_accel;
+        v_cmd = constrain(v_cmd, last_v_cmd - max_dv, last_v_cmd + max_dv);
+    }
+    last_v_cmd = v_cmd;
+
     // =========================
-    // VELOCIDADE ANGULAR
+    // VELOCIDADE ANGULAR (PD com w filtrado)
     // =========================
     float w_cmd = 0.0f;
+
     if (aligning_in_place) {
-        // Gira no lugar na direção do alvo
-        w_cmd = angle_error_path * 4.0f;
+        // PD puro: proporcional ao erro, derivativo no w real (filtrado)
+        w_cmd = 1.8f * angle_error_path - 0.8f * w_filtered;
+
+        // Banda morta absoluta: abaixo de 3° não aplica torque (corta tremida residual)
+        if (fabs(angle_error_path) < 0.05f) {
+            w_cmd = 0.0f;
+        }
     } else {
-        // Comportamento normal do Pure Pursuit para seguir reta sem oscilar
-        w_cmd = v_cmd * curvature;
+        // Controle polar suave durante navegação
+        w_cmd = 0.4f * angle_error_path - 0.3f * w_filtered;
     }
 
-    // damping
-    w_cmd -= current_w * 0.2f;
-
-    if (fabs(w_cmd) < VEL_MIN_ANG && fabs(curvature) > 0.05f)
-        w_cmd = copysign(VEL_MIN_ANG, w_cmd);
+    // VEL_MIN_ANG só força se o erro ainda é relevante; caso contrário zera
+    // (ausência desse 'else w=0' era a causa principal da tremida residual)
+    if (fabs(w_cmd) < VEL_MIN_ANG) {
+        if (fabs(angle_error_path) > 0.08f)
+            w_cmd = copysign(VEL_MIN_ANG, w_cmd);
+        else
+            w_cmd = 0.0f;
+    }
 
     w_cmd = constrain(w_cmd, -VEL_MAX_ANG, VEL_MAX_ANG);
+
+    // ============================================
+    // LIMITADOR DE ACELERAÇÃO ANGULAR
+    // ============================================
+    static float last_w_cmd = 0.0f;
+    if (dt_accel > 0.0f && dt_accel < 0.5f) {
+        float max_dw = 10.0f * dt_accel;
+        w_cmd = constrain(w_cmd, last_w_cmd - max_dw, last_w_cmd + max_dw);
+    }
+    last_w_cmd = w_cmd;
 
     // =========================
     // CINEMÁTICA DIFERENCIAL
     // =========================
-    float L = WHEEL_BASE_CM;
-
+    float L  = WHEEL_BASE_CM;
     float vl = v_cmd - (w_cmd * L * 0.5f);
     float vr = v_cmd + (w_cmd * L * 0.5f);
 
@@ -414,9 +328,8 @@ void DiffCar::navigate_to_target_pure_pursuit(
     bool reached_position = (distance < precision);
     bool reached_heading  = (!use_heading || fabs(final_error) < 0.05f);
 
-    if (reached_position && reached_heading)
-    {
-        left_velocity_target = 0.0f;
+    if (reached_position && reached_heading) {
+        left_velocity_target  = 0.0f;
         right_velocity_target = 0.0f;
         mode = 0;
     }

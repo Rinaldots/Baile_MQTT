@@ -3,24 +3,47 @@
 #include <cmath>
 #include <QuickPID.h>
 #include <Preferences.h>
+#include <sTune.h>
 
 #define BITS_MOTOR 10
-#define MAX_PWM (pow(2, BITS_MOTOR) - 1) // 65535 para 16 bits
+#define MAX_PWM 1023 // 1023 para 10 bits
 
-QuickPID left_pid(&diffCar.left_velocity_cms, &diffCar.left_pid_output, &diffCar.abs_left_velocity_target);
-QuickPID right_pid(&diffCar.right_velocity_cms, &diffCar.right_pid_output, &diffCar.abs_right_velocity_target);
+QuickPID left_pid(&diffCar.left_velocity_cms, &diffCar.left_pid_output, &diffCar.left_velocity_target);
+QuickPID right_pid(&diffCar.right_velocity_cms, &diffCar.right_pid_output, &diffCar.right_velocity_target);
 
 void DiffCar::setup_h_bridge(){
     Preferences prefs;
-    prefs.begin("fuzzy", true);
-    left_pid.SetTunings(prefs.getFloat("Kp_left", 50.0f), prefs.getFloat("Ki_left", 1.0f), prefs.getFloat("Kd_left", 1.0f));
-    right_pid.SetTunings(prefs.getFloat("Kp_right", 50.0f), prefs.getFloat("Ki_right", 1.0f), prefs.getFloat("Kd_right", 1.0f));
+    prefs.begin("fuzzy", false);
+    
+    // Load PID values, but protect against corrupted NaN/Inf values from previous failed Autotune attempts
+    // Valores atualizados do último Auto-Tune:
+    float kp_l = prefs.getFloat("Kp_left", 8.860f);
+    float ki_l = prefs.getFloat("Ki_left", 1.171f);
+    float kd_l = prefs.getFloat("Kd_left", 9.950f);
+    
+    float kp_r = prefs.getFloat("Kp_right", 10.945f);
+    float ki_r = prefs.getFloat("Ki_right", 1.157f);
+    float kd_r = prefs.getFloat("Kd_right", 2.893f);
+    
+    if (isnan(kp_l) || isinf(kp_l)) kp_l = 8.860f;
+    if (isnan(ki_l) || isinf(ki_l)) ki_l = 1.171f;
+    if (isnan(kd_l) || isinf(kd_l)) kd_l = 9.950f;
+    
+    if (isnan(kp_r) || isinf(kp_r)) kp_r = 10.945f;
+    if (isnan(ki_r) || isinf(ki_r)) ki_r = 1.157f;
+    if (isnan(kd_r) || isinf(kd_r)) kd_r = 2.893f;
+
+    left_pid.SetTunings(kp_l, ki_l, kd_l);
+    right_pid.SetTunings(kp_r, ki_r, kd_r);
 
     prefs.end();
+
     left_pid.SetSampleTimeUs(LOOP_FAST_US);
     right_pid.SetSampleTimeUs(LOOP_FAST_US);
-    left_pid.SetMode(left_pid.Control::automatic);
-    right_pid.SetMode(right_pid.Control::automatic);
+    left_pid.SetMode(QuickPID::Control::automatic);
+    right_pid.SetMode(QuickPID::Control::automatic);
+    left_pid.SetOutputLimits(0, MAX_PWM);
+    right_pid.SetOutputLimits(0, MAX_PWM);
 
     pinMode(MOTOR_IN1, OUTPUT);
     pinMode(MOTOR_IN2, OUTPUT);
@@ -37,15 +60,7 @@ void DiffCar::setup_h_bridge(){
     ledcSetup(3, 1000, BITS_MOTOR);
     ledcAttachPin(MOTOR_IN4, 3);
 
-    Preferences preferences;
-    preferences.begin("motor_calib", false);
-    min_pwm_left = preferences.getFloat("min_pwml", 0.0f);
-    min_pwm_right = preferences.getFloat("min_pwmr", 0.0f);
-    left_pid.SetOutputLimits(min_pwm_left, MAX_PWM);
-    right_pid.SetOutputLimits(min_pwm_right, MAX_PWM);
-    preferences.end();
-    
-    // Se a inercia nao foi calibrada, chama a calibracao auto
+    // Se a inercia nao foi calibrada, chama a calibracao automatica
     if (min_pwm_left == 0.0f || min_pwm_right == 0.0f) {
         calibrate_motors_inertia();
     } else {
@@ -153,80 +168,224 @@ void DiffCar::update_h_bridge(){
 }
 
 void DiffCar::handler_motor() {
-    abs_left_velocity_target = fabs(left_velocity_target);
-    abs_right_velocity_target = fabs(right_velocity_target);
+    // Alimenta as variáveis absolutas lidas pelos PIDs
+    abs_left_velocity_target = left_velocity_target;
+    abs_right_velocity_target = right_velocity_target;
+
+    left_motor_dir = (left_velocity_target >= 0) ? 1 : 0;
+    right_motor_dir = (right_velocity_target >= 0) ? 1 : 0;
 
     // ── Fuzzy computa PWM diretamente ────────────────────────────
     if (left_velocity_target != 0.0f) {
-        left_pid.Compute();  
+        if (fabs(left_velocity_cms) < 0.1f) {
+            left_pid_output = 771.0f;
+        } else {
+            left_pid.Compute();  
+        }
     } else {
         left_pid.Reset();
         left_pid_output = 0.0f;
     }
     
     if (right_velocity_target != 0.0f) {
-        right_pid.Compute();
+        if (fabs(right_velocity_cms) < 0.1f) {
+            right_pid_output = 771.0f;
+        } else {
+            right_pid.Compute();
+        }
     } else {
         right_pid.Reset();
         right_pid_output = 0.0f;
     }
 
-    // ── TCS — igual ao original ───────────────────────────────────
-    static float safe_pwm_left  = 0.0f;
-    static float safe_pwm_right = 0.0f;
-    static float prev_enc_vel_l = 0.0f;
-    static float prev_enc_vel_r = 0.0f;
-    static float whl_accel_l    = 0.0f;
-    static float whl_accel_r    = 0.0f;
+    left_motor_pwm = left_pid_output;
+    right_motor_pwm = right_pid_output;
+    update_h_bridge();
+}
 
-    float raw_whl_accel_l = fabs(left_velocity_cms  - prev_enc_vel_l) / 0.01f;
-    float raw_whl_accel_r = fabs(right_velocity_cms - prev_enc_vel_r) / 0.01f;
-    
-    whl_accel_l = 0.2f * raw_whl_accel_l + 0.8f * whl_accel_l;
-    whl_accel_r = 0.2f * raw_whl_accel_r + 0.8f * whl_accel_r;
 
-    prev_enc_vel_l = left_velocity_cms;
-    prev_enc_vel_r = right_velocity_cms;
+void DiffCar::auto_tune_pid() {
 
-    float imu_accel_xy = sqrtf(powf(accel_d[0], 2) + powf(accel_d[1], 2)) * 9.81f;
+    Serial.println("=== AUTO TUNE START ESQUERDO ===");
 
-    // Slew rate em PWM (era 0.02 de vel → ~5 PWM equivalente)
-    float max_step  = 5.0f;
-    float slip_step = 0.5f;
+    float tune_in = 0.0f;
+    float tune_out = 0.0f;
 
-    if ((whl_accel_l > 3.0f || whl_accel_r > 3.0f) && imu_accel_xy < 0.5f) {
-        max_step = slip_step;
+    sTune tuner(&tune_in, &tune_out, sTune::ZN_PID, sTune::directIP, sTune::printSUMMARY);
+
+    tuner.Configure(
+        150.0f,        // input span
+        1023,       // output span
+        0,  // start output
+        1023 * 0.7f,// step
+        5,            // test time
+        10,             // settle
+        200            // samples
+    );
+
+    tuner.SetEmergencyStop(200);
+
+    left_motor_dir = 1;
+
+    bool done = false;
+
+    while (!done) {
+
+        velocity_update();
+        tune_in = left_velocity_cms;
+
+        uint8_t status = tuner.Run();
+
+        if (status == sTune::sample) {
+
+            left_motor_pwm = tune_out;
+            update_h_bridge();
+
+            Serial.printf("OUT: %.1f | Vel: %.2f\n", left_motor_pwm, tune_in);
+
+        }
+
+        if (status == sTune::tunings) {
+                left_motor_pwm = 0;
+                update_h_bridge();
+
+                Serial.println("\n================================================");
+                Serial.println("  TESTE CONCLUÍDO! CALCULANDO TODAS AS REGRAS  ");
+                Serial.println("================================================");
+
+                // Imprime as sintonias PID (Proporcional, Integral, Derivativo)
+                tuner.SetTuningMethod(sTune::ZN_PID);
+                tuner.printTunings();
+                
+                tuner.SetTuningMethod(sTune::DampedOsc_PID);
+                tuner.printTunings();
+                
+                tuner.SetTuningMethod(sTune::NoOvershoot_PID);
+                tuner.printTunings();
+                
+                tuner.SetTuningMethod(sTune::CohenCoon_PID);
+                tuner.printTunings();
+                
+                tuner.SetTuningMethod(sTune::Mixed_PID);
+                tuner.printTunings();
+
+                // Imprime as sintonias PI (Apenas Proporcional e Integral - Ótimo se tiver ruído)
+                Serial.println("\n--- SINTONIAS APENAS PI (Sem Derivativo) ---");
+                tuner.SetTuningMethod(sTune::ZN_PI);
+                tuner.printTunings();
+
+                tuner.SetTuningMethod(sTune::NoOvershoot_PI);
+                tuner.printTunings();
+
+                done = true;
+        }
+
+        delay(10); // 🔥 CRÍTICO (não usar microseconds aqui!)
     }
 
-    // ── Rampa sobre o PWM fuzzy ───────────────────────────────────
-    float raw_pwm_left  = left_pid_output;   // já é PWM (0–1023)
-    float raw_pwm_right = right_pid_output;
-
-    if      (raw_pwm_left  > safe_pwm_left  + max_step) safe_pwm_left  += max_step;
-    else if (raw_pwm_left  < safe_pwm_left  - max_step) safe_pwm_left  -= max_step;
-    else safe_pwm_left  = raw_pwm_left;
-
-    if      (raw_pwm_right > safe_pwm_right + max_step) safe_pwm_right += max_step;
-    else if (raw_pwm_right < safe_pwm_right - max_step) safe_pwm_right -= max_step;
-    else safe_pwm_right = raw_pwm_right;
-
-    if (left_velocity_target  == 0.0f && safe_pwm_left  < 3.0f) safe_pwm_left  = 0.0f;
-    if (right_velocity_target == 0.0f && safe_pwm_right < 3.0f) safe_pwm_right = 0.0f;
-
-    // ── Aplica direção e min_pwm de inércia ──────────────────────
-    left_motor_dir  = (left_velocity_target  >= 0.0f) ? 1 : 0;
-    right_motor_dir = (right_velocity_target >= 0.0f) ? 1 : 0;
-
-    // Compensa inércia: mapeia PWM fuzzy (0–1023) para zona útil real
-    auto apply_inertia = [](float pwm, float min_pwm) -> int {
-        if (pwm < 1.0f) return 0;
-        float mapped = min_pwm + (pwm / MAX_PWM) * (MAX_PWM - min_pwm);
-        return (int)constrain(mapped, 0.0f, MAX_PWM);
-    };
-
-    left_motor_pwm  = apply_inertia(safe_pwm_left,  min_pwm_left);
-    right_motor_pwm = apply_inertia(safe_pwm_right, min_pwm_right);
-
-    // 4. Atualiza a Ponte H diretamente
+    left_motor_pwm = 0;
     update_h_bridge();
+
+    float kp = tuner.GetKp();
+    float ki = tuner.GetKi();
+    float kd = tuner.GetKd();
+
+    if (isnan(kp) || isinf(kp)) {
+        Serial.println("❌ Tuning falhou");
+        return;
+    }
+
+    Serial.printf("✅ESQUERDO Kp=%.4f Ki=%.4f Kd=%.4f\n", kp, ki, kd);
+    
+    Serial.println("=== AUTO TUNE START DIREITO ===");
+
+    tune_in = 0.0f;
+    tune_out = 0.0f;
+
+    sTune tuner2(&tune_in, &tune_out, sTune::ZN_PID, sTune::directIP, sTune::printSUMMARY);
+
+    tuner2.Configure(
+        150.0f,        // input span
+        1023,       // output span
+        0,  // start output
+        1023 * 0.7f,// step
+        5,            // test time
+        10,             // settle
+        200            // samples
+    );
+
+    tuner2.SetEmergencyStop(200);
+
+    right_motor_dir = 1;
+
+    done = false;
+
+    while (!done) {
+
+        velocity_update();
+        tune_in = right_velocity_cms;
+
+        uint8_t status = tuner2.Run();
+
+        if (status == sTune::sample) {
+
+            right_motor_pwm = tune_out;
+            update_h_bridge();
+
+            Serial.printf("OUT: %.1f | Vel: %.2f\n", right_motor_pwm, tune_in);
+
+        }
+
+        if (status == sTune::tunings) {
+                right_motor_pwm = 0;
+                update_h_bridge();
+
+                Serial.println("\n================================================");
+                Serial.println("  TESTE CONCLUÍDO! CALCULANDO TODAS AS REGRAS  ");
+                Serial.println("================================================");
+
+                // Imprime as sintonias PID (Proporcional, Integral, Derivativo)
+                tuner2.SetTuningMethod(sTune::ZN_PID);
+                tuner2.printTunings();
+                
+                tuner2.SetTuningMethod(sTune::DampedOsc_PID);
+                tuner2.printTunings();
+                
+                tuner2.SetTuningMethod(sTune::NoOvershoot_PID);
+                tuner2.printTunings();
+                
+                tuner2.SetTuningMethod(sTune::CohenCoon_PID);
+                tuner2.printTunings();
+                
+                tuner2.SetTuningMethod(sTune::Mixed_PID);
+                tuner2.printTunings();
+
+                // Imprime as sintonias PI (Apenas Proporcional e Integral - Ótimo se tiver ruído)
+                Serial.println("\n--- SINTONIAS APENAS PI (Sem Derivativo) ---");
+                tuner2.SetTuningMethod(sTune::ZN_PI);
+                tuner2.printTunings();
+
+                tuner2.SetTuningMethod(sTune::NoOvershoot_PI);
+                tuner2.printTunings();
+
+                done = true;
+        }
+
+        delay(10); // 🔥 CRÍTICO (não usar microseconds aqui!)
+    }
+
+    right_motor_pwm = 0;
+    update_h_bridge();
+
+    kp = tuner2.GetKp();
+    ki = tuner2.GetKi();
+    kd = tuner2.GetKd();
+
+    if (isnan(kp) || isinf(kp)) {
+        Serial.println("❌ Tuning falhou");
+        return;
+    }
+    Serial.printf("✅DIREITO Kp=%.4f Ki=%.4f Kd=%.4f\n", kp, ki, kd);
+
+
 }

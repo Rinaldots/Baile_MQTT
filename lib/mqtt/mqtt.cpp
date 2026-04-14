@@ -207,10 +207,10 @@ void MqttTask::updateTelemetry() {
   }
   // Exemplo de publicação de telemetria
   String telemetry = "{";
-    telemetry += "\"left_velocity_cms\":" + String(diffCar.left_velocity_cms) + ",";
-    telemetry += "\"right_velocity_cms\":" + String(diffCar.right_velocity_cms) + ",";
-    telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
-    telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
+  telemetry += "\"left_velocity_cms\":" + String(diffCar.left_velocity_cms) + ",";
+  telemetry += "\"right_velocity_cms\":" + String(diffCar.right_velocity_cms) + ",";
+  telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
+  telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
   telemetry += "\"x\":" + String(diffCar.odom_real.x/100.0) + ",";
   telemetry += "\"y\":" + String(diffCar.odom_real.y/100.0) + ",";
   telemetry += "\"theta\":" + String(diffCar.odom_real.theta) + ",";
