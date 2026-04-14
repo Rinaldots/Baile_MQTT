@@ -29,11 +29,42 @@ void DiffCar::encoder_odometry_update() {
     float dt = (current_time - last_odom_time) * 1e-6f;
     last_odom_time = current_time;
 
-    float vl = left_motor_dir ? left_velocity_cms : -left_velocity_cms;
-    float vr = right_motor_dir ? right_velocity_cms : -right_velocity_cms; 
+    // Failsafe para pauses da Task ou Boot inicial
+    if (dt > 0.5f) dt = 0.0f;
 
-    float v = (vr + vl) * 0.5f;             
-    float omega = (vr - vl) * (1.0f / WHEEL_BASE_CM);              
+    // 1. Lê a quantidade exata de pulsos (protegido contra interrupções)
+    static uint32_t last_left_pulses = 0;
+    static uint32_t last_right_pulses = 0;
+
+    noInterrupts();
+    uint32_t current_left_pulses = left_total_pulses;
+    uint32_t current_right_pulses = right_total_pulses;
+    interrupts();
+
+    // 2. Calcula quantos pulsos ocorreram desde o último ciclo
+    int32_t delta_left_p = current_left_pulses - last_left_pulses;
+    int32_t delta_right_p = current_right_pulses - last_right_pulses;
+
+    last_left_pulses = current_left_pulses;
+    last_right_pulses = current_right_pulses;
+
+    // 3. Converte os pulsos em distância real percorrida (aplicando a direção)
+    float delta_left_dist  = delta_left_p  * CENTIMETER_PER_PULSE * (left_motor_dir  ? 1.0f : -1.0f);
+    float delta_right_dist = delta_right_p * CENTIMETER_PER_PULSE * (right_motor_dir ? 1.0f : -1.0f);
+
+    // 4. Cinemática do deslocamento
+    float delta_center_dist = (delta_right_dist + delta_left_dist) * 0.5f; // Movimento linear
+    float delta_theta       = (delta_right_dist - delta_left_dist) / WHEEL_BASE_CM; // Rotação
+
+    // Calcula velocidades médias do intervalo para alimentar o Kalman EKF depois
+    float v = (dt > 0) ? (delta_center_dist / dt) : 0.0f;
+    float omega = (dt > 0) ? (delta_theta / dt) : 0.0f;
+
+    // 5. Integração Perfeita da Odometria Bruta (Encoder Puro)
+    odom_enc.theta += delta_theta;
+    odom_enc.theta = wrapAngleD(odom_enc.theta); // Mantém entre -PI e PI
+    odom_enc.x += delta_center_dist * cosf(odom_enc.theta);
+    odom_enc.y += delta_center_dist * sinf(odom_enc.theta);
     
     odom_enc.linear_velocity = v;
     odom_enc.angular_velocity = omega;

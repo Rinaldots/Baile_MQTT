@@ -11,6 +11,7 @@
 
 volatile uint32_t last_time_left = 0;
 volatile uint32_t interval_left = 0;
+
 volatile uint32_t last_time_right = 0;
 volatile uint32_t interval_right = 0;
 
@@ -21,25 +22,23 @@ static void IRAM_ATTR pcnt_intr_handler(void *arg) {
     
     if (intr_status & BIT(PCNT_LEFT_UNIT)) {
         uint32_t dt = now - last_time_left;
-        // Debounce: ignora pulsos mais rápidos que 1ms (1000 us = max 1000 pps)
         if (dt > 1000) {
             interval_left = dt;
             last_time_left = now;
+            diffCar.left_total_pulses++;  
         }
-        PCNT.int_clr.val = BIT(PCNT_LEFT_UNIT); // Limpa flag de interrupção
-        // Reseta o contador para o próximo pulso acionar h_lim=1 novamente
+        PCNT.int_clr.val = BIT(PCNT_LEFT_UNIT);
         PCNT.ctrl.cnt_rst_u0 = 1;
         PCNT.ctrl.cnt_rst_u0 = 0;
     }
     if (intr_status & BIT(PCNT_RIGHT_UNIT)) {
         uint32_t dt = now - last_time_right;
-        // Debounce: ignora pulsos mais rápidos que 1ms
         if (dt > 1000) {
             interval_right = dt;
             last_time_right = now;
+            diffCar.right_total_pulses++; 
         }
-        PCNT.int_clr.val = BIT(PCNT_RIGHT_UNIT); // Limpa flag de interrupção
-        // Reseta o contador
+        PCNT.int_clr.val = BIT(PCNT_RIGHT_UNIT);
         PCNT.ctrl.cnt_rst_u1 = 1;
         PCNT.ctrl.cnt_rst_u1 = 0;
     }
@@ -162,28 +161,31 @@ void DiffCar::velocity_update() {
     // ── Deadzone (parado real) ───────────────────────────────────
     if (left_freq_filtered  < MIN_PULSES) left_freq_filtered  = 0.0f;
     if (right_freq_filtered < MIN_PULSES) right_freq_filtered = 0.0f;
-
+    abs_left_velocity_cms = left_freq_filtered  * CENTIMETER_PER_PULSE;
+    abs_right_velocity_cms = right_freq_filtered * CENTIMETER_PER_PULSE;
     // ── Conversão para m/s com sinal de direção ──────────────────
     // A chave óptica não detecta direção — usamos o comando do motor
-    left_velocity_cms  = left_freq_filtered  * CENTIMETER_PER_PULSE
+    left_velocity_cms  = abs_left_velocity_cms
                         * (left_motor_dir  ? 1.0f : -1.0f);
-    right_velocity_cms = right_freq_filtered * CENTIMETER_PER_PULSE
+    right_velocity_cms = abs_right_velocity_cms
                         * (right_motor_dir ? 1.0f : -1.0f);
+
+    
 }
 
 void DiffCar::debug_encoder() {
       
       Serial.print(" | LV(cm/s): ");
-      Serial.print(left_velocity_cms, 2);
+      Serial.print(abs_left_velocity_cms, 2);
       Serial.print(" | TLV: ");
-      Serial.print(left_velocity_target, 2);
+      Serial.print(abs_left_velocity_target, 2);
       Serial.print(" | Lp: ");
-      Serial.println(left_motor_pwm, 2);
+      Serial.println(left_pid_output, 2);
     
         Serial.print(" | RV(cm/s): ");
-        Serial.print(right_velocity_cms, 2);
+        Serial.print(abs_right_velocity_cms, 2);
         Serial.print(" | TRV: ");
-        Serial.print(right_velocity_target, 2);
+        Serial.print(abs_right_velocity_target, 2);
         Serial.print(" | Rp: ");
         Serial.println(right_motor_pwm, 2);
 }

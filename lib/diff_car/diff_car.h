@@ -61,6 +61,8 @@ public:
     int16_t left_count_snapshot  = 0;
     int16_t right_count_snapshot = 0;
 
+    volatile uint32_t right_total_pulses = 0;
+    volatile uint32_t left_total_pulses = 0;
     // Tempo do último cálculo de velocidade
     unsigned long last_vel_update_us = 0;
 
@@ -72,9 +74,12 @@ public:
     float left_velocity_cms  = 0.0f;
     float right_velocity_cms = 0.0f;
 
+    float abs_left_velocity_cms  = 0.0f;
+    float abs_right_velocity_cms = 0.0f;
     // Velocidade alvo (m/s)
     float left_velocity_target  = 0.0f;
     float right_velocity_target = 0.0f;
+
 
     float abs_left_velocity_target  = 0.0f;
     float abs_right_velocity_target = 0.0f;

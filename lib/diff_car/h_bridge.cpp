@@ -8,8 +8,8 @@
 #define BITS_MOTOR 10
 #define MAX_PWM 1023 // 1023 para 10 bits
 
-QuickPID left_pid(&diffCar.left_velocity_cms, &diffCar.left_pid_output, &diffCar.left_velocity_target);
-QuickPID right_pid(&diffCar.right_velocity_cms, &diffCar.right_pid_output, &diffCar.right_velocity_target);
+QuickPID left_pid(&diffCar.abs_left_velocity_cms, &diffCar.left_pid_output, &diffCar.abs_left_velocity_target);
+QuickPID right_pid(&diffCar.abs_right_velocity_cms, &diffCar.right_pid_output, &diffCar.abs_right_velocity_target);
 
 void DiffCar::setup_h_bridge(){
     Preferences prefs;
@@ -19,19 +19,19 @@ void DiffCar::setup_h_bridge(){
     // Valores atualizados do último Auto-Tune:
     float kp_l = prefs.getFloat("Kp_left", 8.860f);
     float ki_l = prefs.getFloat("Ki_left", 1.171f);
-    float kd_l = prefs.getFloat("Kd_left", 9.950f);
+    float kd_l = prefs.getFloat("Kd_left", 0.0f);
     
     float kp_r = prefs.getFloat("Kp_right", 10.945f);
     float ki_r = prefs.getFloat("Ki_right", 1.157f);
-    float kd_r = prefs.getFloat("Kd_right", 2.893f);
+    float kd_r = prefs.getFloat("Kd_right", 0.0f);
     
     if (isnan(kp_l) || isinf(kp_l)) kp_l = 8.860f;
     if (isnan(ki_l) || isinf(ki_l)) ki_l = 1.171f;
-    if (isnan(kd_l) || isinf(kd_l)) kd_l = 9.950f;
+    if (isnan(kd_l) || isinf(kd_l)) kd_l = 0.0f;
     
     if (isnan(kp_r) || isinf(kp_r)) kp_r = 10.945f;
     if (isnan(ki_r) || isinf(ki_r)) ki_r = 1.157f;
-    if (isnan(kd_r) || isinf(kd_r)) kd_r = 2.893f;
+    if (isnan(kd_r) || isinf(kd_r)) kd_r = 0.0f;
 
     left_pid.SetTunings(kp_l, ki_l, kd_l);
     right_pid.SetTunings(kp_r, ki_r, kd_r);
@@ -42,8 +42,8 @@ void DiffCar::setup_h_bridge(){
     right_pid.SetSampleTimeUs(LOOP_FAST_US);
     left_pid.SetMode(QuickPID::Control::automatic);
     right_pid.SetMode(QuickPID::Control::automatic);
-    left_pid.SetOutputLimits(0, MAX_PWM);
-    right_pid.SetOutputLimits(0, MAX_PWM);
+    left_pid.SetOutputLimits(400, MAX_PWM);
+    right_pid.SetOutputLimits(400, MAX_PWM);
 
     pinMode(MOTOR_IN1, OUTPUT);
     pinMode(MOTOR_IN2, OUTPUT);
@@ -169,37 +169,44 @@ void DiffCar::update_h_bridge(){
 
 void DiffCar::handler_motor() {
     // Alimenta as variáveis absolutas lidas pelos PIDs
-    abs_left_velocity_target = left_velocity_target;
-    abs_right_velocity_target = right_velocity_target;
+    abs_left_velocity_target = fabs(left_velocity_target);
+    abs_right_velocity_target = fabs(right_velocity_target);
 
     left_motor_dir = (left_velocity_target >= 0) ? 1 : 0;
     right_motor_dir = (right_velocity_target >= 0) ? 1 : 0;
 
-    // ── Fuzzy computa PWM diretamente ────────────────────────────
+    // ── Motor Esquerdo ────────────────────────────
     if (left_velocity_target != 0.0f) {
-        if (fabs(left_velocity_cms) < 0.1f) {
-            left_pid_output = 771.0f;
+        left_pid.Compute(); // O PID faz as contas livremente, acumulando o erro
+        
+        if (abs_left_velocity_cms < 0.1f) {
+            // Roda parada: envia o tranco de 771 diretamente para o motor para vencer a inércia
+            left_motor_pwm = 1023.0f;
         } else {
-            left_pid.Compute();  
+            // Roda em movimento: o atrito é menor, entregamos o controlo ao PID
+            left_motor_pwm = left_pid_output;
         }
     } else {
         left_pid.Reset();
         left_pid_output = 0.0f;
+        left_motor_pwm = 0.0f;
     }
     
+    // ── Motor Direito ────────────────────────────
     if (right_velocity_target != 0.0f) {
-        if (fabs(right_velocity_cms) < 0.1f) {
-            right_pid_output = 771.0f;
+        right_pid.Compute();
+        
+        if (abs_right_velocity_cms < 0.1f) {
+            right_motor_pwm = 1023.0f;
         } else {
-            right_pid.Compute();
+            right_motor_pwm = right_pid_output;
         }
     } else {
         right_pid.Reset();
         right_pid_output = 0.0f;
+        right_motor_pwm = 0.0f;
     }
 
-    left_motor_pwm = left_pid_output;
-    right_motor_pwm = right_pid_output;
     update_h_bridge();
 }
 

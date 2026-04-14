@@ -69,7 +69,7 @@ void loop() {
             diffCar.handler_motor();
             if(diffCar.mode == 1){
                 // Alvo XY e angulo | Tolerância coordenada | Velocidade Linear escalar
-                diffCar.navigate_to_target_pure_pursuit(diffCar.target_x, diffCar.target_y, NAN, 15.0f, 25.0f);
+                diffCar.navigate_to_target_pure_pursuit(diffCar.target_x, diffCar.target_y, NAN, 15.0f, 30.0f);
             }
         }
 
