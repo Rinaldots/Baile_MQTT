@@ -129,7 +129,7 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
         if (mensagem[6] == '-'){
           dist = -dist;
         }
-        diffCar.mover_distancia(dist, 0.4f);
+        
       } else if (mensagem[4] == 'G' && mensagem[5] == 'O') {
         int idx1 = mensagem.indexOf(':', 7);
         int idx2 = mensagem.indexOf(':', idx1 + 1);

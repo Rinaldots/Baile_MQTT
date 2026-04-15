@@ -46,6 +46,7 @@ void setup() {
     //diffCar.tuning_mode = true;
     //diffCar.auto_tune_pid();
     //diffCar.tuning_mode = false;
+    //diffCar.mpu_covariance();
 }
 
 
@@ -64,7 +65,7 @@ void loop() {
         if (now - lastFast >= LOOP_FAST_US) { 
             lastFast = now;
             diffCar.velocity_update();
-            diffCar.debug_encoder();
+            //diffCar.debug_encoder();
             diffCar.encoder_odometry_update();
             diffCar.handler_motor();
             if(diffCar.mode == 1){

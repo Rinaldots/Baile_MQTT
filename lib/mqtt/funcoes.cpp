@@ -78,7 +78,7 @@ void MqttTask::movT_Reto(int tempoMov) {
 }
 
 void MqttTask::MovDistancia(float metros, float velocidade_linear) {
-    diffCar.mover_distancia(metros, velocidade_linear);
+    
 }
 
 void MqttTask::movF(int tempoMov){

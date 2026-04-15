@@ -17,21 +17,21 @@ void DiffCar::setup_h_bridge(){
     
     // Load PID values, but protect against corrupted NaN/Inf values from previous failed Autotune attempts
     // Valores atualizados do último Auto-Tune:
-    float kp_l = prefs.getFloat("Kp_left", 8.860f);
-    float ki_l = prefs.getFloat("Ki_left", 1.171f);
-    float kd_l = prefs.getFloat("Kd_left", 0.0f);
+    float kp_l = prefs.getFloat("Kp_left", 4.600f);
+    float ki_l = prefs.getFloat("Ki_left", 2.066f);
+    float kd_l = prefs.getFloat("Kd_left", 8.264f);
     
-    float kp_r = prefs.getFloat("Kp_right", 10.945f);
-    float ki_r = prefs.getFloat("Ki_right", 1.157f);
-    float kd_r = prefs.getFloat("Kd_right", 0.0f);
+    float kp_r = prefs.getFloat("Kp_right", 4.419f);
+    float ki_r = prefs.getFloat("Ki_right", 1.852f);
+    float kd_r = prefs.getFloat("Kd_right", 7.407f);
     
-    if (isnan(kp_l) || isinf(kp_l)) kp_l = 8.860f;
-    if (isnan(ki_l) || isinf(ki_l)) ki_l = 1.171f;
-    if (isnan(kd_l) || isinf(kd_l)) kd_l = 0.0f;
+    if (isnan(kp_l) || isinf(kp_l)) kp_l = 4.600f;
+    if (isnan(ki_l) || isinf(ki_l)) ki_l = 2.066f;
+    if (isnan(kd_l) || isinf(kd_l)) kd_l = 8.264f;
     
-    if (isnan(kp_r) || isinf(kp_r)) kp_r = 10.945f;
-    if (isnan(ki_r) || isinf(ki_r)) ki_r = 1.157f;
-    if (isnan(kd_r) || isinf(kd_r)) kd_r = 0.0f;
+    if (isnan(kp_r) || isinf(kp_r)) kp_r = 4.419f;
+    if (isnan(ki_r) || isinf(ki_r)) ki_r = 1.852f;
+    if (isnan(kd_r) || isinf(kd_r)) kd_r = 7.407f;
 
     left_pid.SetTunings(kp_l, ki_l, kd_l);
     right_pid.SetTunings(kp_r, ki_r, kd_r);

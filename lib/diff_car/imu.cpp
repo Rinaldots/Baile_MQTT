@@ -87,4 +87,29 @@ void DiffCar::mpu_update() {
 }
 
 
+void DiffCar::mpu_covariance(){
+    const int N = 3000;
+    Serial.println("Calculando covariância do acelerômetro...");
+    float accel_mean[3] = {0, 0, 0};
+    float accel_M2[3] = {0, 0, 0};
 
+    for (int i = 0; i < N; i++) {
+        // mpu_update() is already being called continuously by mpu_task on Core 0!
+        // mpu_update();
+
+        for (int j = 0; j < 3; j++) {
+            float x = accel_d[j];
+            float delta = x - accel_mean[j];
+            accel_mean[j] += delta / (i + 1);
+            accel_M2[j] += delta * (x - accel_mean[j]);
+        }
+
+        delay(10);
+    }
+
+    Serial.println("Covariância do Acelerômetro:");
+    for (int j = 0; j < 3; j++) {
+        float variance = accel_M2[j] / (N - 1);
+        Serial.printf("Eixo %d: %.6f\n", j, variance);
+    }
+}

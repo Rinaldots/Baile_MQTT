@@ -115,7 +115,7 @@ public:
     void debug_raw_pins();
     // IMU functions
     void mpu_update();
-
+    void mpu_covariance();
     // Leds functions
     byte datArray[8] = {0,0,0,0,0,0,0,0};
     void setup_leds();
@@ -142,7 +142,7 @@ public:
     void navigate_to_target_pure_pursuit(float target_x, float target_y, float target_theta, float precision, float target_velocity);
     void debug_nav();
     void manter_rumo(float velocidade_linear, float angulo_desejado);
-    void mover_distancia(float centimetros, float velocidade_linear = 30.0f);
+    void ekf_update(float dc, float dtheta, float v, float dt);
 };
 
 extern DiffCar diffCar;
