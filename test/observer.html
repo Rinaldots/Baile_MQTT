@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Observer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  video, canvas {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    object-fit: cover;
+  }
+  canvas { pointer-events: none; }
+  #overlay {
+    position: fixed; top: 8px; left: 8px; z-index: 10;
+    color: #0f0; font: 13px/1.4 monospace;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 8px 10px; border-radius: 6px;
+    max-width: calc(100vw - 32px);
+  }
+  #overlay .line { margin: 2px 0; }
+  #overlay .ok  { color: #0f0; }
+  #overlay .wait { color: #fc0; }
+  #overlay .err { color: #f55; }
+</style>
+</head>
+<body>
+<video   id="v" autoplay playsinline muted></video>
+<canvas  id="c"></canvas>
+<div id="overlay">
+  <div class="line" id="st">Iniciando...</div>
+  <div class="line" id="cal">Calibracao: aguardando BA...</div>
+  <div class="line" id="det"></div>
+</div>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>
+// --- Config --------------------------------------------------------------
+const CAM_ID   = new URLSearchParams(location.search).get('cam') || '0';
+const MQTT_URL = 'ws://10.0.0.134:9001';
+
+let H = null;  // homografia 3x3 vinda do bundle_adjustment.py
+
+// --- MQTT ----------------------------------------------------------------
+const client = mqtt.connect(MQTT_URL, {
+  clientId: `obs_${CAM_ID}_${Date.now()}`,
+  reconnectPeriod: 2000,
+});
+
+client.on('connect', () => {
+  setStatus(`cam${CAM_ID} conectada`, 'ok');
+  client.subscribe(`cam/calibration/${CAM_ID}`);
+});
+
+client.on('error', e => setStatus(`MQTT erro: ${e.message}`, 'err'));
+
+client.on('message', (topic, msg) => {
+  if (topic !== `cam/calibration/${CAM_ID}`) return;
+  try {
+    const d = JSON.parse(msg.toString());
+    if (!d.H || d.H.length !== 9) return;
+    H = reshape(d.H);
+    const rmse = d.rmse != null ? d.rmse.toFixed(1) : '?';
+    setCal(`Calibracao BA ativa (RMSE=${rmse}cm)`, 'ok');
+  } catch (e) {
+    setCal(`Erro parse calibracao: ${e.message}`, 'err');
+  }
+});
+
+// --- Camera --------------------------------------------------------------
+const video  = document.getElementById('v');
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d', { willReadFrequently: true });
+
+navigator.mediaDevices.getUserMedia({
+  video: {
+    facingMode: 'environment',
+    width:  { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 60 },
+  }
+}).then(stream => {
+  video.srcObject = stream;
+  video.onloadedmetadata = () => {
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    requestAnimationFrame(loop);
+  };
+}).catch(err => setStatus(`Camera: ${err.message}`, 'err'));
+
+// --- Loop ----------------------------------------------------------------
+function loop() {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const img   = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const blobs = detectLEDs(img);
+
+  if (blobs.length) {
+    const detections = blobs.map(b => {
+      const det = {
+        pixel: { u: b.cx, v: b.cy },
+        area:  b.area,
+        color: b.color,
+      };
+      if (H) det.world = applyH(H, b.cx, b.cy);
+      return det;
+    });
+
+    client.publish(`observer/cam${CAM_ID}`, JSON.stringify({
+      cam: CAM_ID, t: Date.now(), detections,
+    }));
+
+    draw(blobs);
+    updateDetInfo(detections);
+  } else {
+    document.getElementById('det').textContent = '';
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// --- Deteccao de LEDs ----------------------------------------------------
+function detectLEDs(img) {
+  const { data, width, height } = img;
+  const mask = new Uint8Array(width * height);
+  const blobs = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (mask[idx]) continue;
+      const i = idx * 4;
+      const color = classify(data[i], data[i + 1], data[i + 2]);
+      if (!color) continue;
+      const b = bfs(data, width, height, mask, x, y, color);
+      if (b.area > 8) blobs.push(b);
+    }
+  }
+  return blobs;
+}
+
+function classify(r, g, b) {
+  const mx = Math.max(r, g, b);
+  if (mx < 180) return null;
+  if (r > 1.8 * g && r > 1.8 * b) return 'red';
+  if (g > 1.8 * r && g > 1.8 * b) return 'green';
+  if (b > 1.8 * r && b > 1.8 * g) return 'blue';
+  if (mx - Math.min(r, g, b) < 30) return 'white';
+  return null;
+}
+
+function bfs(data, w, h, mask, sx, sy, color) {
+  const stack = [[sx, sy]];
+  let sumX = 0, sumY = 0, area = 0;
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    if (x < 0 || x >= w || y < 0 || y >= h) continue;
+    const idx = y * w + x;
+    if (mask[idx]) continue;
+    const i = idx * 4;
+    if (classify(data[i], data[i + 1], data[i + 2]) !== color) continue;
+    mask[idx] = 1;
+    sumX += x; sumY += y; area++;
+    stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
+  return { cx: sumX / area, cy: sumY / area, area, color };
+}
+
+// --- Homografia ----------------------------------------------------------
+function applyH(H, u, v) {
+  const w = H[2][0] * u + H[2][1] * v + H[2][2];
+  return {
+    x: (H[0][0] * u + H[0][1] * v + H[0][2]) / w,
+    y: (H[1][0] * u + H[1][1] * v + H[1][2]) / w,
+  };
+}
+
+function reshape(flat) {
+  return [
+    [flat[0], flat[1], flat[2]],
+    [flat[3], flat[4], flat[5]],
+    [flat[6], flat[7], flat[8]],
+  ];
+}
+
+// --- UI ------------------------------------------------------------------
+function draw(blobs) {
+  ctx.lineWidth = 3;
+  blobs.forEach(b => {
+    ctx.strokeStyle = b.color === 'white' ? '#fff' : b.color;
+    ctx.beginPath();
+    ctx.arc(b.cx, b.cy, 14, 0, 2 * Math.PI);
+    ctx.stroke();
+  });
+}
+
+function updateDetInfo(dets) {
+  document.getElementById('det').textContent = dets.map(d => {
+    if (d.world) {
+      return `${d.color}: (${d.world.x.toFixed(0)}, ${d.world.y.toFixed(0)}) cm`;
+    }
+    return `${d.color}: px(${d.pixel.u.toFixed(0)}, ${d.pixel.v.toFixed(0)})`;
+  }).join(' | ');
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('st');
+  el.textContent = msg;
+  el.className = 'line ' + (cls || '');
+}
+
+function setCal(msg, cls) {
+  const el = document.getElementById('cal');
+  el.textContent = msg;
+  el.className = 'line ' + (cls || '');
+}
+</script>
+</body>
+</html>
