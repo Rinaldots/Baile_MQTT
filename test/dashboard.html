@@ -15,6 +15,13 @@
     </style>
 </head>
 <body>
+    <div id="controls-top" style="position: absolute; top: 10px; right: 10px; z-index: 1000; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; color: white;">
+        <b>Selecione o Robô:</b>
+        <select id="roboSelect" onchange="selecionarRobo(this.value);" style="padding: 5px; font-size: 14px; margin-left: 10px;">
+            <option value="">Aguardando robôs...</option>
+        </select>
+    </div>
+
     <div class="panel" style="width: 300px; flex-shrink: 0;">
         <h2>Status do Robo</h2>
         <p>MQTT: <span id="mqtt_status" style="color: red;">Desconectado</span></p>
@@ -25,15 +32,14 @@
         <p>Esq: <span id="val_vl">0.00</span> | Alvo Esq: <span id="val_vlt">0.00</span></p>
         <p>Dir: <span id="val_vr">0.00</span> | Alvo Dir: <span id="val_vrt">0.00</span></p>
         <hr style="border-color: #333;">
-        <h3>Fuzzy Autotuning (Esq)</h3>
-        <p id="fuzzy_sug" style="color: yellow; font-size: 0.9em; min-height: 40px;">Aguardando alteração de velocidade...</p>
-        <div style="background: rgba(0,0,0,0.3); padding: 10px; border-radius: 5px; font-size: 0.9em;">
-            <div class="param-row"><label>Ke: </label><input type="number" id="inp_ke" value="1.0" step="0.1"></div>
-            <div class="param-row"><label>Kde: </label><input type="number" id="inp_kde" value="1.0" step="0.1"></div>
-            <div class="param-row"><label>Kout: </label><input type="number" id="inp_kout" value="1.0" step="0.1"></div>
-            <div class="param-row"><label>MaxInc:</label><input type="number" id="inp_maxinc" value="0.025" step="0.005"></div>
-            <button onclick="sendFuzzyParams()" style="background: #00aaff;">Atualizar Fuzzy</button>
-            <button id="btn_ai_tuner" onclick="applyAiSuggestion()" style="background: #ff00a6; display:none;">Aplicar IA Suggestion</button>
+        <h3>PID Params</h3>
+        <p>Esq -> Kp: <span id="val_kpl">0.00</span> Ki: <span id="val_kil">0.00</span> Kd: <span id="val_kdl">0.00</span></p>
+        <p>Dir -> Kp: <span id="val_kpr">0.00</span> Ki: <span id="val_kir">0.00</span> Kd: <span id="val_kdr">0.00</span></p>
+        <div style="background: rgba(0,0,0,0.3); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-top: 10px;">
+            <div class="param-row"><label>Kp Esq/Dir: </label><input type="number" id="inp_kp" value="1.0" step="0.1"></div>
+            <div class="param-row"><label>Ki Esq/Dir: </label><input type="number" id="inp_ki" value="1.0" step="0.1"></div>
+            <div class="param-row"><label>Kd Esq/Dir: </label><input type="number" id="inp_kd" value="1.0" step="0.1"></div>
+            <button onclick="sendParam()" style="background: #00aaff;">Atualizar PID</button>
         </div>
         <hr style="border-color: #333;">
         <h3>IMU</h3>
@@ -61,98 +67,13 @@
             client.subscribe('telemetry');
         });
 
-        function sendFuzzyParams() {
-            let ke = document.getElementById("inp_ke").value;
-            let kde = document.getElementById("inp_kde").value;
-            let kout = document.getElementById("inp_kout").value;
-            let maxinc = document.getElementById("inp_maxinc").value;
-            let msg = `Ke:${ke} Kde:${kde} Kout:${kout} MaxInc:${maxinc}`;
-            client.publish('/parametros', msg);
-        }
-
-        let tuneState = { prevTarget: 0, active: false, startTime: 0, samples: 0, overshoot: 0, steadyErrorSum: 0, peakVel: 0 };
-        let aiSuggestion = null;
-
-        function applyAiSuggestion() {
-            if (!aiSuggestion) return;
-            document.getElementById('inp_ke').value = aiSuggestion.ke.toFixed(2);
-            document.getElementById('inp_kde').value = aiSuggestion.kde.toFixed(2);
-            document.getElementById('inp_kout').value = aiSuggestion.kout.toFixed(2);
-            document.getElementById('inp_maxinc').value = aiSuggestion.maxinc.toFixed(4);
-            sendFuzzyParams();
-            document.getElementById('btn_ai_tuner').style.display = 'none';
-        }
-
-        function analyzeFuzzy(vel, target) {
-            let absTarget = Math.abs(target);
-            let absVel = Math.abs(vel);
-            if (Math.abs(absTarget - tuneState.prevTarget) > 0.15) {
-                tuneState.active = true;
-                tuneState.startTime = Date.now();
-                tuneState.samples = 0;
-                tuneState.peakVel = 0;
-                tuneState.steadyErrorSum = 0;
-                aiSuggestion = null;
-                document.getElementById('btn_ai_tuner').style.display = 'none';
-                document.getElementById('fuzzy_sug').innerText = "Analisando resposta do motor...";
-                document.getElementById('fuzzy_sug').style.color = "yellow";
-            }
-            tuneState.prevTarget = absTarget;
-
-            if (tuneState.active && absTarget > 0.05) {
-                let elapsed = Date.now() - tuneState.startTime;
-                if (absVel > tuneState.peakVel) tuneState.peakVel = absVel;
-                if (elapsed > 600) { 
-                    tuneState.steadyErrorSum += (absTarget - absVel);
-                    tuneState.samples++;
-                }
-                if (elapsed > 2000) { 
-                    tuneState.active = false;
-                    let avgError = tuneState.samples > 0 ? (tuneState.steadyErrorSum / tuneState.samples) : 0;
-                    let os = absTarget > 0 ? ((tuneState.peakVel - absTarget) / absTarget) : 0;
-                    let suggestion = "Resposta Boa!";
-                    let sColor = "#0f0";
-                    let currKe = parseFloat(document.getElementById('inp_ke').value);
-                    let currKde = parseFloat(document.getElementById('inp_kde').value);
-                    let currKout = parseFloat(document.getElementById('inp_kout').value);
-                    let currMaxinc = parseFloat(document.getElementById('inp_maxinc').value);
-                    let nextAi = { ke: currKe, kde: currKde, kout: currKout, maxinc: currMaxinc };
-
-                    if (os > 0.20) {
-                        suggestion = `OverShoot Alto +${(os*100).toFixed(0)}%. IA reduziu ganho base e subiu derivada.`;
-                        sColor = "red";
-                        nextAi.kde = currKde * 1.25;
-                        nextAi.kout = currKout * 0.85;
-                        nextAi.maxinc = currMaxinc * 0.90;
-                    } else if (avgError > 0.10 * absTarget) {
-                        suggestion = `Falta Força! Erro Médio: -${avgError.toFixed(2)}. IA aumentou ganho maximo e Ke.`;
-                        sColor = "orange";
-                        nextAi.ke = currKe * 1.20;
-                        nextAi.kout = currKout * 1.15;
-                        nextAi.maxinc = currMaxinc * 1.20;
-                    } else if (avgError < -0.10 * absTarget) {
-                        suggestion = `Aceleração Residual (-). Erro: ${avgError.toFixed(2)}. IA reduziu Ganho MAX e Integral.`;
-                        sColor = "orange";
-                        nextAi.kout = currKout * 0.85;
-                        nextAi.maxinc = currMaxinc * 0.85;
-                    } else if (tuneState.peakVel < absTarget * 0.5) {
-                        suggestion = "Extremamente Lento. IA aumentará bastante o ganho Saída.";
-                        sColor = "red";
-                        nextAi.kout = currKout * 1.40;
-                        nextAi.maxinc = currMaxinc * 1.40;
-                    }
-
-                    document.getElementById('fuzzy_sug').innerText = suggestion;
-                    document.getElementById('fuzzy_sug').style.color = sColor;
-                    if (suggestion !== "Resposta Boa!") {
-                        aiSuggestion = nextAi;
-                        document.getElementById('btn_ai_tuner').style.display = 'inline-block';
-                    }
-                }
-            } else if (tuneState.active && absTarget <= 0.05 && (Date.now() - tuneState.startTime > 3000)) {
-                tuneState.active = false;
-                document.getElementById('fuzzy_sug').innerText = "Parado. Aguardando novo degrau...";
-                document.getElementById('fuzzy_sug').style.color = "yellow";
+        function sendParam() {
+            let kp = document.getElementById("inp_kp").value;
+            let ki = document.getElementById("inp_ki").value;
+            let kd = document.getElementById("inp_kd").value;
+            let msg = `Kp:${kp} Ki:${ki} Kd:${kd}`;
+            if(activeRobot) {
+                client.publish(`/${activeRobot}/parametros`, msg);
             }
         }
 
@@ -224,69 +145,189 @@
             }
         });
 
+        // Configuração de Enxame e MQTT
+        let activeRobot = null;
+        let onlineRobots = {};
+
+        function onConnect() {
+            document.getElementById('mqtt_status').innerText = 'Conectado';
+            document.getElementById('mqtt_status').style.color = '#0f0';
+            client.subscribe('/geral/robots');
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const rId = urlParams.get('robot');
+            if (rId) selecionarRobo(rId);
+        }
+
+        client.on('connect', onConnect);
+        client.on('reconnect', () => {
+            document.getElementById('mqtt_status').innerText = 'Reconectando...';
+            document.getElementById('mqtt_status').style.color = 'yellow';
+        });
+        client.on('offline', () => {
+            document.getElementById('mqtt_status').innerText = 'Desconectado';
+            document.getElementById('mqtt_status').style.color = 'red';
+        });
+
+        // Limpeza de robôs offline a cada 2 segundos
+        setInterval(() => {
+            let now = Date.now();
+            let changed = false;
+            for (let r in onlineRobots) {
+                if (now - onlineRobots[r] > 10000) {
+                    delete onlineRobots[r];
+                    changed = true;
+                    if (r === activeRobot) {
+                         activeRobot = null;
+                         atualizarListaRobos();
+                         document.getElementById('roboSelect').value = "";
+                    }
+                }
+            }
+            if (changed) atualizarListaRobos();
+        }, 2000);
+
+        function atualizarListaRobos() {
+            const sel = document.getElementById('roboSelect');
+            sel.innerHTML = '<option value="">Ouvindo tráfego...</option>';
+            for (let r in onlineRobots) {
+                let opt = document.createElement('option');
+                opt.value = r;
+                opt.text = "🤖 " + r;
+                if (r === activeRobot) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if(activeRobot && !onlineRobots[activeRobot]) {
+                let opt = document.createElement('option');
+                opt.value = activeRobot;
+                opt.text = "🤖 " + activeRobot + " (Offline)";
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        }
+
+        window.selecionarRobo = function(robotId) {
+            if (!robotId) return;
+            if (activeRobot) {
+                client.unsubscribe(`/${activeRobot}/#`);
+            }
+            activeRobot = robotId;
+            client.subscribe(`/${activeRobot}/#`);
+            document.getElementById('roboSelect').value = robotId;
+            console.log("Dashboard conectado a:", robotId);
+            
+            // Limita a url sem reload pra ficar fácil enviar para os amiguinhos
+            const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname + '?robot=' + robotId;
+            window.history.pushState({path:newUrl},'',newUrl);
+            
+            // Limpa gráficos
+            imuChart.data.datasets.forEach(d => d.data = []);
+            velChart.data.datasets.forEach(d => d.data = []);
+            fftChart.data.datasets.forEach(d => d.data = []);
+            velBufferL = [];
+            velBufferR = [];
+            imuChart.update();
+            velChart.update();
+            fftChart.update();
+        };
+
+
         client.on('message', (topic, message) => {
-            if (topic === 'telemetry') {
-                const data = JSON.parse(message.toString());
-                
-                analyzeFuzzy(data.left_velocity_cms || 0, data.left_vel_target || 0);
+            const data = JSON.parse(message.toString());
 
-                document.getElementById('val_x').innerText = data.x.toFixed(2);
-                document.getElementById('val_y').innerText = data.y.toFixed(2);
-                document.getElementById('val_t').innerText = data.theta.toFixed(2);
-                document.getElementById('val_ax').innerText = data.accel_x.toFixed(2);
-                document.getElementById('val_ay').innerText = data.accel_y.toFixed(2);
-                document.getElementById('val_az').innerText = data.accel_z.toFixed(2);
-                document.getElementById('val_gx').innerText = data.gyro_x.toFixed(1);
-                document.getElementById('val_gy').innerText = data.gyro_y.toFixed(1);
-                document.getElementById('val_gz').innerText = data.gyro_z.toFixed(1);
-                document.getElementById('val_yaw').innerText = data.yaw_imu.toFixed(2); 
-                document.getElementById('val_vl').innerText = data.left_velocity_cms !== undefined ? data.left_velocity_cms.toFixed(3) : "0.000";
-                document.getElementById('val_vr').innerText = data.right_velocity_cms !== undefined ? data.right_velocity_cms.toFixed(3) : "0.000";
-                document.getElementById('val_vlt').innerText = data.left_vel_target !== undefined ? data.left_vel_target.toFixed(3) : "0.000";
-                document.getElementById('val_vrt').innerText = data.right_vel_target !== undefined ? data.right_vel_target.toFixed(3) : "0.000";
+            if (topic === '/geral/robots') {
+                 if (data.id) {
+                     let isNew = !onlineRobots[data.id];
+                     onlineRobots[data.id] = Date.now();
+                     if (isNew) atualizarListaRobos();
+                 }
+                 return;
+            }
 
-                imuChart.data.datasets[0].data.push(data.accel_x);
-                imuChart.data.datasets[1].data.push(data.accel_y);
-                imuChart.data.datasets[2].data.push(data.accel_z);
-                if (imuChart.data.datasets[0].data.length > maxDataPoints) {
-                    imuChart.data.datasets[0].data.shift();
-                    imuChart.data.datasets[1].data.shift();
-                    imuChart.data.datasets[2].data.shift();
-                }
-                imuChart.update();
+            if (activeRobot) {
+                if (topic === `/${activeRobot}/odom`) {
+                    document.getElementById('val_x').innerText = data.x.toFixed(2);
+                    document.getElementById('val_y').innerText = data.y.toFixed(2);
+                    document.getElementById('val_t').innerText = data.theta.toFixed(2);
+                } else if (topic === `/${activeRobot}/imu`) {
+                    document.getElementById('val_ax').innerText = data.accel[0].toFixed(2);
+                    document.getElementById('val_ay').innerText = data.accel[1].toFixed(2);
+                    document.getElementById('val_az').innerText = data.accel[2].toFixed(2);
+                    document.getElementById('val_gx').innerText = data.gyro[0].toFixed(1);
+                    document.getElementById('val_gy').innerText = data.gyro[1].toFixed(1);
+                    document.getElementById('val_gz').innerText = data.gyro[2].toFixed(1);
+                    document.getElementById('val_yaw').innerText = data.yaw.toFixed(2); 
 
-                let l_vel = data.left_velocity_cms !== undefined ? data.left_velocity_cms : 0;
-                let r_vel = data.right_velocity_cms !== undefined ? data.right_velocity_cms : 0;
-                let l_tgt = data.left_vel_target !== undefined ? data.left_vel_target : 0;
-                let r_tgt = data.right_vel_target !== undefined ? data.right_vel_target : 0;
-                velChart.data.datasets[0].data.push(l_vel);
-                velChart.data.datasets[1].data.push(r_vel);
-                velChart.data.datasets[2].data.push(l_tgt);
-                velChart.data.datasets[3].data.push(r_tgt);
-                if (velChart.data.datasets[0].data.length > maxDataPoints) {
-                    velChart.data.datasets[0].data.shift();
-                    velChart.data.datasets[1].data.shift();
-                    velChart.data.datasets[2].data.shift();
-                    velChart.data.datasets[3].data.shift();
-                }
-                velChart.update();
+                    imuChart.data.datasets[0].data.push(data.accel[0]);
+                    imuChart.data.datasets[1].data.push(data.accel[1]);
+                    imuChart.data.datasets[2].data.push(data.accel[2]);
+                    if (imuChart.data.datasets[0].data.length > maxDataPoints) {
+                        imuChart.data.datasets[0].data.shift();
+                        imuChart.data.datasets[1].data.shift();
+                        imuChart.data.datasets[2].data.shift();
+                    }
+                    imuChart.update();
+                } else if (topic === `/${activeRobot}/velocity`) {
+                    
+                    document.getElementById('val_vl').innerText = data.left !== undefined ? data.left.toFixed(3) : "0.000";
+                    document.getElementById('val_vr').innerText = data.right !== undefined ? data.right.toFixed(3) : "0.000";
+                    document.getElementById('val_vlt').innerText = data.target_l !== undefined ? data.target_l.toFixed(3) : "0.000";
+                    document.getElementById('val_vrt').innerText = data.target_r !== undefined ? data.target_r.toFixed(3) : "0.000";
 
-                // ── FFT Update ──
-                velBufferL.push(l_vel);
-                velBufferR.push(r_vel);
-                if (velBufferL.length > fftSize) {
-                    velBufferL.shift();
-                    velBufferR.shift();
-                }
-                
-                // Atualiza o gráfico de espectro quando o buffer está cheio
-                if (velBufferL.length === fftSize) {
-                    fftChart.data.datasets[0].data = computeMagnitudeSpectrum(velBufferL);
-                    fftChart.data.datasets[1].data = computeMagnitudeSpectrum(velBufferR);
-                    fftChart.update();
+                    let l_vel = data.left !== undefined ? data.left : 0;
+                    let r_vel = data.right !== undefined ? data.right : 0;
+                    let l_tgt = data.target_l !== undefined ? data.target_l : 0;
+                    let r_tgt = data.target_r !== undefined ? data.target_r : 0;
+                    velChart.data.datasets[0].data.push(l_vel);
+                    velChart.data.datasets[1].data.push(r_vel);
+                    velChart.data.datasets[2].data.push(l_tgt);
+                    velChart.data.datasets[3].data.push(r_tgt);
+                    if (velChart.data.datasets[0].data.length > maxDataPoints) {
+                        velChart.data.datasets[0].data.shift();
+                        velChart.data.datasets[1].data.shift();
+                        velChart.data.datasets[2].data.shift();
+                        velChart.data.datasets[3].data.shift();
+                    }
+                    velChart.update();
+
+                    // ── FFT Update ──
+                    velBufferL.push(l_vel);
+                    velBufferR.push(r_vel);
+                    if (velBufferL.length > fftSize) {
+                        velBufferL.shift();
+                        velBufferR.shift();
+                    }
+                    
+                    if (velBufferL.length === fftSize) {
+                        fftChart.data.datasets[0].data = computeMagnitudeSpectrum(velBufferL);
+                        fftChart.data.datasets[1].data = computeMagnitudeSpectrum(velBufferR);
+                        fftChart.update();
+                    }
                 }
             }
         });
+        
+        function sendParam() {
+            if(!activeRobot) return alert("Selecione um robô!");
+            let ke = document.getElementById('inp_ke').value;
+            let kde = document.getElementById('inp_kde').value;
+            let kout = document.getElementById('inp_kout').value;
+            let maxI = document.getElementById('inp_maxi').value;
+            let msg = `Kp_left:${ke} Kd_left:${kde} Kp_right:${kout} Kd_right:${maxI}`;
+            client.publish(`/${activeRobot}/parametros`, msg);
+            console.log("Enviado Parâmetros para", activeRobot, ":", msg);
+        }
+
+        window.enviaFuzzyAutom = function() {
+            if(!activeRobot) return alert("Selecione um robô!");
+            if(aiSuggestion) {
+                document.getElementById('inp_ke').value = aiSuggestion.Ke;
+                document.getElementById('inp_kde').value = aiSuggestion.Kde;
+                document.getElementById('inp_kout').value = aiSuggestion.Kout;
+                document.getElementById('btn_ai_tuner').style.display = 'none';
+                sendParam();
+            }
+        }
     </script>
 </body>
 </html>

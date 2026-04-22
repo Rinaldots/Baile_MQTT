@@ -7,6 +7,9 @@ extern IPAddress mqtt_server;
 
 class MqttTask {
     public:
+    String robot_id;
+    String base_topic;
+    String geral_topic; // tópico para mensagens gerais (ex: logs, descobertas, etc)
     bool MQTT_Connected = false;                    
     void publish(const std::string& topic, const std::string& message);
     bool reconnect();
@@ -16,10 +19,16 @@ class MqttTask {
     void callback(char* topic, byte* payload, unsigned int length);
     
     // Telemetria
+    void publishOdometry();
+    void publishVelocity();
+    void publishIMU();
+    void publishPID();
+    void publishDiscovery();
+
     void updateTelemetry();
     
     // MQTT setup
-    void setup();
+    void setup(String id);
 
     //Funções legado
     void girE(int tempoGiro);

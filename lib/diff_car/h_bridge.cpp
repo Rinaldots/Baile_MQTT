@@ -180,12 +180,13 @@ void DiffCar::handler_motor() {
         left_pid.Compute(); // O PID faz as contas livremente, acumulando o erro
         
         if (abs_left_velocity_cms < 0.1f) {
-            // Roda parada: envia o tranco de 771 diretamente para o motor para vencer a inércia
+            // Roda parada: envia o 1023 para vencer a inércia estática, mesmo que o PID queira mandar menos. Isso ajuda a sair do lugar.
             left_motor_pwm = 1023.0f;
         } else {
             // Roda em movimento: o atrito é menor, entregamos o controlo ao PID
             left_motor_pwm = left_pid_output;
         }
+    
     } else {
         left_pid.Reset();
         left_pid_output = 0.0f;
@@ -195,7 +196,6 @@ void DiffCar::handler_motor() {
     // ── Motor Direito ────────────────────────────
     if (right_velocity_target != 0.0f) {
         right_pid.Compute();
-        
         if (abs_right_velocity_cms < 0.1f) {
             right_motor_pwm = 1023.0f;
         } else {

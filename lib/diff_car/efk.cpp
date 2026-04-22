@@ -2,11 +2,6 @@
 #include <math.h>
 #include <stdio.h>
 
-static double wrapAngleD(double a) {
-  while (a > M_PI) a -= 2.0 * M_PI;
-  while (a <= -M_PI) a += 2.0 * M_PI;
-  return a;
-}
 
 void DiffCar::ekf_update(float dc, float dtheta, float v, float dt) {
 
@@ -28,7 +23,7 @@ void DiffCar::ekf_update(float dc, float dtheta, float v, float dt) {
     float Xp[4];
     Xp[0] = X[0] + dc * cosf(theta_mid);
     Xp[1] = X[1] + dc * sinf(theta_mid);
-    Xp[2] = wrapAngleD(X[2] + dtheta);
+    Xp[2] = atan2f(sinf(X[2] + dtheta), cosf(X[2] + dtheta));
     Xp[3] = v;
 
     float F[4][4] = {
@@ -57,7 +52,7 @@ void DiffCar::ekf_update(float dc, float dtheta, float v, float dt) {
     float z_v = v;
 
     float y[2];
-    y[0] = wrapAngleD(z_theta - Xp[2]);
+    y[0] = atan2f(sinf(z_theta - Xp[2]), cosf(z_theta - Xp[2]));
     y[1] = z_v - Xp[3];
 
     float S[2][2];
@@ -87,7 +82,7 @@ void DiffCar::ekf_update(float dc, float dtheta, float v, float dt) {
     for(int i=0;i<4;i++)
         X[i] = Xp[i] + K[i][0]*y[0] + K[i][1]*y[1];
 
-    X[2] = wrapAngleD(X[2]);
+    X[2] = atan2f(sinf(X[2]), cosf(X[2]));
 
     float I_KH[4][4] = {0};
     for(int i=0;i<4;i++){

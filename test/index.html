@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Robo 3D Telemetry</title>
+    <title>Robo 3D Telemetry (Enxame)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
@@ -14,15 +14,28 @@
         button { padding: 15px; cursor: pointer; background: #444; color: white; border: none; border-radius: 5px; font-weight: bold; }
         button:active { background: #666; }
         .status { color: #0f0; }
+        #robos_list { position: absolute; top: 60px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 15px; border-radius: 8px; max-height: 200px; overflow-y: auto; z-index: 100; min-width: 150px;}
+        .robo-item { display: flex; justify-content: space-between; padding: 5px; border-bottom: 1px solid #444; align-items: center; }
+        .robo-item button { padding: 5px 10px; background: #007bff; font-size: 12px; }
     </style>
 </head>
 <body>
 
-<a href="dashboard.html" target="_blank" style="position: absolute; top: 10px; left: 10px; z-index: 999; background: rgba(0,0,0,0.7); color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px; border: 1px solid #444; font-family: sans-serif;">Abrir Dashboard 📈</a>
+<a id="dashboard-link" href="dashboard.html" target="_blank" style="position: absolute; top: 10px; left: 10px; z-index: 999; background: rgba(0,0,0,0.7); color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px; border: 1px solid #444; font-family: sans-serif;">Abrir Dashboard 📈 (Selecione um robô)</a>
 
+<a id="dashboard-slam-link" href="dashboard_slam.html" target="_blank" style="position: absolute; top: 10px; left: 360px; z-index: 999; background: rgba(0,0,0,0.7); color: #0f0; padding: 10px 15px; text-decoration: none; border-radius: 5px; border: 1px solid #444; font-family: sans-serif;">Abrir SLAM Dashboard 📡</a>
 
+<div id="robos_list">
+    <b>Robôs Online:</b>
+    <div id="online-robots-container" style="margin-top: 10px;">Aguardando...</div>
+</div>
 
 <div id="controls">
+    <div style="grid-column: 1 / 4; text-align: center; margin-bottom: 5px;">
+        <label style="cursor: pointer; background: #555; padding: 5px 10px; border-radius: 5px; font-size: 14px;">
+            <input type="checkbox" id="chk_swarm"> Modo Enxame (Síncrono)
+        </label>
+    </div>
     <button style="grid-column: 2" onclick="sendCmd('DNX=MF')">FRENTE</button>
     <button onclick="sendCmd('DNX=GE')">ESQ</button>
     <button onclick="sendCmd('DNX=PA')">PARA</button>
@@ -51,15 +64,84 @@
 
 <script>
     // --- CONFIGURAÇÃO MQTT ---
-    // Nota: O ESP32 usa porta 1883 (TCP). O navegador EXIGE WebSockets (geralmente porta 9001 ou 15675)
-    // Se o seu broker não tiver WebSockets ativo, essa interface não conectará.
     const broker = 'ws://10.0.0.134:9001'; 
     const client = mqtt.connect(broker);
+    
+    let activeRobot = null;
+    let robotsOnline = {}; // map de id -> timestamp_ultimo_ping
 
     client.on('connect', () => {
         console.log('Conectado ao MQTT');
-        client.subscribe('telemetry');
+        // Descobre robôs diretamente pela telemetria
+        client.subscribe('/+/odom');
+        client.subscribe('/+/imu');
+        // Usado pelo modo Enxame (Two-Phase Commit)
+        client.subscribe('/geral/ack');
     });
+
+    setInterval(() => {
+        // Limpa robôs que não mandam ping há 10 segundos
+        let now = Date.now();
+        let changed = false;
+        for (let r in robotsOnline) {
+            if (now - robotsOnline[r] > 10000) {
+                delete robotsOnline[r];
+                changed = true;
+
+                if (robotMeshes[r]) {
+                    scene.remove(robotMeshes[r]);
+                    delete robotMeshes[r];
+                }
+
+                if (activeRobot === r) {
+                    activeRobot = null;
+                    document.getElementById('dashboard-link').innerText = "Abrir Dashboard 📈 (Selecione um robô)";
+                    document.getElementById('dashboard-link').href = "dashboard.html";
+                }
+            }
+        }
+        if (changed) updateRobotsUI();
+    }, 2000);
+
+    function selectRobot(id) {
+        activeRobot = id;
+        console.log("Robô ativo selecionado:", activeRobot);
+        
+        // Atualiza UI
+        updateRobotsUI();
+        
+        // Prepara link dinâmico para o Dashboard
+        let dLink = document.getElementById('dashboard-link');
+        dLink.innerText = `Abrir Dashboard 📈 [${id}]`;
+        dLink.href = `dashboard.html?robot=${id}`;
+
+        let dSlamLink = document.getElementById('dashboard-slam-link');
+        dSlamLink.innerText = `Abrir SLAM Dashboard 📡 [${id}]`;
+        dSlamLink.href = `dashboard_slam.html?robot=${id}`;
+    }
+
+    function updateRobotsUI() {
+        const container = document.getElementById('online-robots-container');
+        container.innerHTML = '';
+        let count = Object.keys(robotsOnline).length;
+        
+        if (count === 0) {
+             container.innerHTML = '<span style="color:#aaa;">Nenhum robô encontrado.</span>';
+             return;
+        }
+
+        for (let r in robotsOnline) {
+            let div = document.createElement('div');
+            div.className = "robo-item";
+            let color = (r === activeRobot) ? "#28a745" : "#444";
+            
+            div.innerHTML = `
+               <span style="font-family: monospace; font-size:14px;">🤖 ${r}</span> 
+               <button style="background: ${color};" onclick="selectRobot('${r}')">${r === activeRobot ? 'Selecionado' : 'Monitorar'}</button>
+            `;
+            container.appendChild(div);
+        }
+    }
 
 
     // --- NAVEGAÇÃO MULTIPONTOS ---
@@ -142,12 +224,46 @@
     // Inicializa a UI vazia
     updatePathUI();
 
+    let pendingSwarmAcks = new Set();
+    let isSwarming = false;
+    let expectedAcks = 0;
+
+    function handleSwarmCommand(cmd) {
+        let activeCount = Object.keys(robotsOnline).length;
+        if (activeCount === 0) return alert("Nenhum robô online para o enxame!");
+        
+        isSwarming = true;
+        pendingSwarmAcks.clear();
+        expectedAcks = activeCount;
+
+        console.log(`[SWARM] Preparando ${expectedAcks} robôs... Env. /geral/cmd ->`, cmd);
+        client.publish('/geral/cmd', cmd);
+
+        // Desiste se demorar mais que 3s para o ACK
+        setTimeout(() => {
+            if (isSwarming) {
+                console.warn("[SWARM] Timeout aguardando ACKs. Abortando execução.");
+                isSwarming = false;
+            }
+        }, 3000);
+    }
+
     function sendCmd(cmd) {
-        client.publish('cmd', cmd);
-        console.log("Enviado:", cmd);
+        let swarmMode = document.getElementById('chk_swarm').checked;
+        if (swarmMode) {
+            return handleSwarmCommand(cmd);
+        }
+        
+        if (!activeRobot) return alert('Selecione um Robô primeiro!');
+        client.publish(`/${activeRobot}/cmd`, cmd);
+        console.log("Enviado para", activeRobot, ":", cmd);
     }
 
     function sendNavCmd(x, y, theta) {
+        let swarmMode = document.getElementById('chk_swarm').checked;
+        
+        if (!swarmMode && !activeRobot) return alert('Selecione um Robô primeiro!');
+        
         // Se chamado sem parametros, pega os valores da caixinha (Inputs HTML)
         if(x === undefined) {
              x = parseFloat(document.getElementById('inp_x').value*100); // Converte para cm
@@ -156,8 +272,14 @@
         }
         
         let cmd = `DNX=GO:${x.toFixed(2)}:${y.toFixed(2)}:${theta.toFixed(2)}`;
-        client.publish('cmd', cmd);
-        console.log("Comando de Navegação Enviado:", cmd);
+        
+        if (swarmMode) {
+            // Em modo enxame todos vão para o mesmo X,Y? (Apenas pra teste do protocolo)
+            return handleSwarmCommand(cmd);
+        }
+
+        client.publish(`/${activeRobot}/cmd`, cmd);
+        console.log("Comando de Navegação Enviado para", activeRobot, ":", cmd);
         
         // Pinta um ponto de destino esverdeado no mundo 3D
         if (!window.targetSphere) {
@@ -181,79 +303,97 @@
     scene.add(grid);
 
     // ==========================================
-    // ROBÔ (GLTF / GLB - Modelos Importados)
+    // ROBÔS (GLTF / GLB - Modelos Importados)
     // ==========================================
-    const carGroup = new THREE.Group();
-    // Reduzimos um pouco a escala global do grupo pra caber bem no grid do Odom:
-    carGroup.scale.set(0.1, 0.1, 0.1); 
-    scene.add(carGroup);
-
-    // Seta da IMU (Acelerômetro)
-    const imuDir = new THREE.Vector3(0, 0, 1);
-    const imuOrigin = new THREE.Vector3(0, 5, 0); // Fica acima da cabeça dele p/ nao esconder
-    const imuArrowHelp = new THREE.ArrowHelper(imuDir, imuOrigin, 3.5, 0xff0000, 1.0, 0.5);
-    carGroup.add(imuArrowHelp);
-
-    // Setup Loaders
+    
     const dracoLoader = new THREE.DRACOLoader();
     dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
     const loader = new THREE.GLTFLoader();
     loader.setDRACOLoader(dracoLoader);
 
-    // Função universal para carregar as pecinhas reproduzindo EXATAMENTE o seu script
-    function loadRobotPart(path, params) {
-        loader.load(path, function(gltf) {
-            gltf.scene.scale.set(10, 10, 10);
-            const box = new THREE.Box3().setFromObject(gltf.scene);
-            const c = box.getCenter(new THREE.Vector3());
-            const size = box.getSize(new THREE.Vector3());
+    const robotMeshes = {};
 
-            // A lógica de recentralização baseada no seu script para cada tipo de peça
-            if (params.centerType === 1) {
-                gltf.scene.position.set(size.z/2 - c.x, -c.y, size.z/2 - c.z);
-            } else if (params.centerType === 2) {
-                gltf.scene.position.set(-c.x, -c.y, size.z/2 - c.z);
-            } else if (params.centerType === 3) {
-                gltf.scene.position.set(-c.x, size.y/2 - c.y, -c.z);
-            } else if (params.centerType === 4) {
-                gltf.scene.position.set(-c.x, -c.y, -c.z);
-            }
+    function createRobotGroup(id) {
+        if (robotMeshes[id]) return robotMeshes[id];
 
-            const dummyGrp = new THREE.Object3D();
-            dummyGrp.add(gltf.scene);
-            dummyGrp.position.set(params.x || 0, params.y || 0, params.z || 0);
+        const carGroup = new THREE.Group();
+        carGroup.scale.set(0.1, 0.1, 0.1); 
+        scene.add(carGroup);
 
-            if (params.rX !== undefined) dummyGrp.rotation.x = params.rX;
-            if (params.rY !== undefined) dummyGrp.rotation.y = params.rY;
-            if (params.rZ !== undefined) dummyGrp.rotation.z = params.rZ;
-            
-            carGroup.add(dummyGrp);
-        });
+        const colorHex = Math.floor(Math.random() * 0xffffff);
+
+        // Seta da IMU (Acelerômetro)
+        const imuDir = new THREE.Vector3(0, 0, 1);
+        const imuOrigin = new THREE.Vector3(0, 5, 0); // Fica acima da cabeça dele p/ nao esconder
+        const imuArrowHelp = new THREE.ArrowHelper(imuDir, imuOrigin, 3.5, colorHex, 1.0, 0.5);
+        carGroup.add(imuArrowHelp);
+        carGroup.imuArrowHelp = imuArrowHelp;
+
+        // Função universal para carregar as pecinhas reproduzindo EXATAMENTE o seu script
+        function loadRobotPart(path, params) {
+            loader.load(path, function(gltf) {
+                // Colore os meshes para identificar o robô
+                gltf.scene.traverse((child) => {
+                    if (child.isMesh && child.material) {
+                        child.material = child.material.clone();
+                        child.material.color.setHex(colorHex);
+                    }
+                });
+
+                gltf.scene.scale.set(10, 10, 10);
+                const box = new THREE.Box3().setFromObject(gltf.scene);
+                const c = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+
+                if (params.centerType === 1) {
+                    gltf.scene.position.set(size.z/2 - c.x, -c.y, size.z/2 - c.z);
+                } else if (params.centerType === 2) {
+                    gltf.scene.position.set(-c.x, -c.y, size.z/2 - c.z);
+                } else if (params.centerType === 3) {
+                    gltf.scene.position.set(-c.x, size.y/2 - c.y, -c.z);
+                } else if (params.centerType === 4) {
+                    gltf.scene.position.set(-c.x, -c.y, -c.z);
+                }
+
+                const dummyGrp = new THREE.Object3D();
+                dummyGrp.add(gltf.scene);
+                dummyGrp.position.set(params.x || 0, params.y || 0, params.z || 0);
+
+                if (params.rX !== undefined) dummyGrp.rotation.x = params.rX;
+                if (params.rY !== undefined) dummyGrp.rotation.y = params.rY;
+                if (params.rZ !== undefined) dummyGrp.rotation.z = params.rZ;
+                
+                carGroup.add(dummyGrp);
+            });
+        }
+
+        // Carregamento EXATO das distâncias, offsets e rotações do seu script (com peças Left e Right)
+        loadRobotPart('models/Base.gltf',               { centerType: 2, y: 0.20, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+        loadRobotPart('models/Tampa.gltf',              { centerType: 2, y: 0.5106, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+        loadRobotPart('models/Suporte PCB.gltf',        { centerType: 1, x: -0.0006, y: 0.510802, z: 0.5453, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+        
+        // Motores
+        loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: 0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Esq
+        loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: -0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Dir
+        
+        // Rodas Principais
+        loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: 0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
+        loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: -0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+        
+        // Caster Wheel Frontal
+        loadRobotPart('models/Caster Base.glb',         { centerType: 1, x: -0.05, y: 0.276802, z: 0.5615, rX: 1.5 * Math.PI });
+        loadRobotPart('models/Caster Wheel Holder.glb', { centerType: 1, x: -0.0085, y: 0.0595, z: 0.727, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+        loadRobotPart('models/Caster WheelShin2.glb',   { centerType: 1, x: -0.0085, y: -0.0410, z: 0.867, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
+
+        // Encoder pecas 
+        loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: 0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Esq
+        loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: -0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+        loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: 0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
+        loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: -0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
+        
+        robotMeshes[id] = carGroup;
+        return carGroup;
     }
-
-    // Carregamento EXATO das distâncias, offsets e rotações do seu script (com peças Left e Right)
-    loadRobotPart('models/Base.gltf',               { centerType: 2, y: 0.20, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
-    loadRobotPart('models/Tampa.gltf',              { centerType: 2, y: 0.5106, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
-    loadRobotPart('models/Suporte PCB.gltf',        { centerType: 1, x: -0.0006, y: 0.510802, z: 0.5453, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
-    
-    // Motores
-    loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: 0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Esq
-    loadRobotPart('models/Motor Carrinho.gltf',     { centerType: 3, x: -0.76, y: 0.28, z: 0.020, rX: 1.5 * Math.PI, rY: 0.5 * Math.PI }); // Dir
-    
-    // Rodas Principais
-    loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: 0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
-    loadRobotPart('models/Roda do Carrinho.gltf',   { centerType: 4, x: -0.985, y: 0.29, z: -0.5202, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
-    
-    // Caster Wheel Frontal
-    loadRobotPart('models/Caster Base.glb',         { centerType: 1, x: -0.05, y: 0.276802, z: 0.5615, rX: 1.5 * Math.PI });
-    loadRobotPart('models/Caster Wheel Holder.glb', { centerType: 1, x: -0.0085, y: 0.0595, z: 0.727, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
-    loadRobotPart('models/Caster WheelShin2.glb',   { centerType: 1, x: -0.0085, y: -0.0410, z: 0.867, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI });
-
-    // Encoder pecas 
-    loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: 0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Esq
-    loadRobotPart('models/Encoder tooths.gltf',     { centerType: 2, x: -0.564, y: 0.405, z: -0.51, rX: -0.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
-    loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: 0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: -0.5 * Math.PI }); // Esq
-    loadRobotPart('models/Roda Encoder.gltf',       { centerType: 3, x: -0.545, y: 0, z: 0, rX: 1.5 * Math.PI, rZ: 0.5 * Math.PI }); // Dir
 
     // Luzes
     const light = new THREE.DirectionalLight(0xffffff, 1);
@@ -314,20 +454,58 @@
 
 // --- ATUALIZAÇÃO DE TELEMETRIA ---
     client.on('message', (topic, message) => {
-        if (topic === 'telemetry') {
-            const data = JSON.parse(message.toString());
-            checkPathProgress(data.x, data.y);
-            carGroup.position.x = data.x;
-            carGroup.position.z = -data.y;
-            carGroup.rotation.y = data.theta + (Math.PI / 2); 
-            const imuVec = new THREE.Vector3(-data.accel_y, data.accel_z, data.accel_x);
-            const imuLen = imuVec.length();
-            if(imuLen > 0.05) {
-                imuArrowHelp.setDirection(imuVec.normalize());
-                imuArrowHelp.setLength(imuLen * 0.5, 0.1, 0.05);
+        const data = JSON.parse(message.toString());
+        
+        if (topic === '/geral/ack') {
+            if (isSwarming && data.status === "ACK" && data.id) {
+                pendingSwarmAcks.add(data.id);
+                console.log(`[SWARM] ACK recebido de ${data.id} (${pendingSwarmAcks.size}/${expectedAcks})`);
+                
+                if (pendingSwarmAcks.size >= expectedAcks) {
+                    console.log("[SWARM] Todos os robôs prontos! Despachando execução: /geral/exec");
+                    client.publish('/geral/exec', 'GO');
+                    isSwarming = false;
+                }
             }
-            controls.target.set(data.x, 0, -data.y);
-            controls.update();
+            return;
+        }
+
+        const match = topic.match(/^\/(.+?)\/(odom|imu)$/);
+        if (match) {
+            const robotId = match[1];
+            const subTopic = match[2];
+            
+            // Garante que QUALQUER telemetria mantenha o robô "Online", evitando o "pisca-pisca"
+            if (robotsOnline[robotId] === undefined) {
+                robotsOnline[robotId] = Date.now();
+                updateRobotsUI(); 
+            } else {
+                robotsOnline[robotId] = Date.now();
+            }
+            
+            const rGroup = createRobotGroup(robotId);
+
+            if (subTopic === 'odom') {
+                
+                
+                if (robotId === activeRobot) {
+                    checkPathProgress(data.x, data.y);
+                    controls.target.set(data.x, 0, -data.y);
+                    controls.update();
+                }
+
+                rGroup.position.x = data.x;
+                rGroup.position.z = -data.y;
+                rGroup.rotation.y = data.theta + (Math.PI / 2); 
+
+            } else if (subTopic === 'imu') {
+                const imuVec = new THREE.Vector3(-data.accel[1], data.accel[2], data.accel[0]);
+                const imuLen = imuVec.length();
+                if(imuLen > 0.05 && rGroup.imuArrowHelp) {
+                    rGroup.imuArrowHelp.setDirection(imuVec.normalize());
+                    rGroup.imuArrowHelp.setLength(imuLen * 0.5, 0.1, 0.05);
+                }
+            }
         }
     });
 

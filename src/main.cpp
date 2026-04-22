@@ -21,12 +21,23 @@ void mpu_task(void *pvParameters)
     }
 }
 
+void mqtt_task(void *pvParameters)
+{
+    const TickType_t dt = pdMS_TO_TICKS(LOOP_MQTT_US / 1000); // Converte US para MS
+    while (true) {
+        mqtt.handler();
+        //Serial.println("MQTT Handler executed");
+        mqtt.updateTelemetry();
+        vTaskDelay(dt);
+    }
+}
+
 void setup() {
 	Serial.begin(115200);
 	Serial.println("Starting...");
 	clearStaleCoreDump();
 	
-	mqtt.setup();
+	mqtt.setup(WiFi.macAddress());
 
 	diffCar.setup();
 
@@ -40,8 +51,18 @@ void setup() {
         0                       // CORE 0 <--------
     );
 
+	xTaskCreatePinnedToCore(
+        mqtt_task,              // função
+        "MQTT Task",            // nome
+        4096,                   // stack
+        NULL,                   // params
+        1,                      // prioridade
+        NULL,                   // task handle
+        0                       // CORE 0 <--------
+    );
+
 	diffCar.update_leds(1,1,0,0,0,0,0,0);
-	Serial.println("Setup complete. BLE task running on Core 0");
+	Serial.println("Setup complete.");
     
     //diffCar.tuning_mode = true;
     //diffCar.auto_tune_pid();
@@ -74,11 +95,6 @@ void loop() {
             }
         }
 
-        if (now - lastMqtt >= LOOP_MQTT_US) {
-            lastMqtt = now;
-            mqtt.handler();
-            mqtt.updateTelemetry();
-        }
         // ============================
         //        1 Hz
         // ============================

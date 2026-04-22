@@ -2,11 +2,6 @@
 #include "mqtt.h"
 #define COMUM_SPEED 30.0f
 
-static double wrapAngleD(double a) {
-  while (a > M_PI) a -= 2.0 * M_PI;
-  while (a <= -M_PI) a += 2.0 * M_PI;
-  return a;
-}
 
 
 void MqttTask::girE(int tempoGiro){
@@ -40,7 +35,7 @@ void MqttTask::movF_Reto(int tempoMov) {
     
     while(millis() - start < tempoMov) {
         // Calcula erro baseado no IMU
-        float erro = wrapAngleD(angulo_inicial - diffCar.ypr_d[0]);
+        float erro = atan2f(sinf(angulo_inicial - diffCar.ypr_d[0]), cosf(angulo_inicial - diffCar.ypr_d[0]));
         float Kp = 1.2f; // Ganho de correção
         
         diffCar.left_velocity_target = COMUM_SPEED - (erro * Kp);
@@ -65,7 +60,7 @@ void MqttTask::movT_Reto(int tempoMov) {
     
     while(millis() - start < tempoMov) {
         // Calcula erro baseado no IMU
-        float erro = wrapAngleD(angulo_inicial - diffCar.ypr_d[0]);
+        float erro = atan2f(sinf(angulo_inicial - diffCar.ypr_d[0]), cosf(angulo_inicial - diffCar.ypr_d[0]));
         float Kp = 1.2f; // Ganho de correção
         
         diffCar.left_velocity_target = -(COMUM_SPEED - (erro * Kp));

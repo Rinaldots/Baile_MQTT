@@ -1,13 +1,15 @@
 #include "mqtt.h"
 #include "diff_car.h"
 #include <QuickPID.h>
-#include "network_config.h"
 #include <Preferences.h>
 #include <Arduino.h>
 #include <cstring>
+#include <time.h> // Incluído para rotinas de tempo
+#include "esp_wifi.h"
 #define DEBUG_MQTT
 
 extern QuickPID left_pid;
+
 extern QuickPID right_pid;
 
 WiFiClient espClient;
@@ -20,11 +22,17 @@ constexpr unsigned long WIFI_CONNECT_WAIT_STEP_MS = 500;
 unsigned long lastWifiAttemptMs = 0;
 bool wifiBeginIssued = false;
 bool wifiWarnedMissingCredentials = false;
+String pending_swarm_cmd = "";
 }
 
-void MqttTask::setup() {
+void MqttTask::setup(String id) {
+  robot_id = id;
+  base_topic = "/" + robot_id;
+  geral_topic = "/geral"; 
+  time_t clocknow;
   waitForWifi();
   client.setServer(mqtt_server, 1883); 
+  client.setBufferSize(512); // Tamanho normal do pacote sem payload do CSI
   client.setCallback([this](char* topic, byte* payload, unsigned int length) {
     this->callback(topic, payload, length);
   });
@@ -40,15 +48,20 @@ bool MqttTask::reconnect() {
     Serial.print("Attempting MQTT connection...");
 
     // Criação de um "Client ID" randômico:
-    String clientId = "dan1";
+    String clientId = robot_id + "-";
     clientId += String(random(0xffff), HEX);
 
     // Tentativa de conexão:
     if(client.connect(clientId.c_str())) {
       MQTT_Connected = true;
       Serial.println("connected");
-      client.subscribe("cmd");
-      client.subscribe("/parametros");
+      client.subscribe((base_topic + "/cmd").c_str());
+      client.subscribe((base_topic + "/parametros").c_str());
+      
+      
+      // Tópicos do enxame:
+      client.subscribe((geral_topic + "/cmd").c_str());
+      client.subscribe((geral_topic + "/exec").c_str());
     }else{
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -74,33 +87,25 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
   messageTemp.trim(); // remove trailing newline/carriage returns
   String mensagem = messageTemp;
 
-  if (String(topic) == "/parametros") {
-      // Formato esperado: Ke:1.0 Kde:1.0 Kout:1.0 MaxInc:0.025
-      float Kp_left, Ki_left, Kd_left, Kp_right, Ki_right, Kd_right;
-
-      int idx;
-      if ((idx = mensagem.indexOf("Kp_left:")) >= 0) Kp_left = mensagem.substring(idx + 8).toFloat();
-      if ((idx = mensagem.indexOf("Ki_left:")) >= 0) Kd_left = mensagem.substring(idx + 8).toFloat();
-      if ((idx = mensagem.indexOf("Kd_left:")) >= 0) Kp_right = mensagem.substring(idx + 9).toFloat();
-      if ((idx = mensagem.indexOf("Kp_right:")) >= 0) Kp_left = mensagem.substring(idx + 9).toFloat();
-      if ((idx = mensagem.indexOf("Ki_right:")) >= 0) Kp_right = mensagem.substring(idx + 9).toFloat();
-      if ((idx = mensagem.indexOf("Kd_right:")) >= 0) Kd_right = mensagem.substring(idx + 9).toFloat();
-
-      Preferences prefs;
-      prefs.begin("fuzzy", false);
-      prefs.putFloat("Kp_left", Kp_left);
-      prefs.putFloat("Ki_left", Ki_left);
-      prefs.putFloat("Kd_left", Kd_left);
-      prefs.putFloat("Kp_right", Kp_right);
-      prefs.putFloat("Ki_right", Ki_right);
-      prefs.putFloat("Kd_right", Kd_right);
-      prefs.end();
-
-      left_pid.SetTunings(Kp_left, Ki_left, Kd_left);
-      right_pid.SetTunings(Kp_right, Ki_right, Kd_right);
-      Serial.printf("Parametros Fuzzy Atualizados: Kp_left=%.3f Kd_left=%.3f Kp_right=%.3f Kd_right=%.3f\n", Kp_left, Kd_left, Kp_right, Kd_right);
+  if (String(topic) == geral_topic + "/cmd") {
+      pending_swarm_cmd = mensagem;
+      String ack_msg = "{\"id\":\"" + robot_id + "\", \"status\":\"ACK\"}";
+      publish(std::string((geral_topic + "/ack").c_str()), ack_msg.c_str());
+      Serial.println("[SWARM] Comando do enxame bufferizado. Enviando ACK para autorização.");
       return;
   }
+
+  if (String(topic) == geral_topic + "/exec") {
+      if (pending_swarm_cmd.length() > 0) {
+          Serial.println("[SWARM] Autorização de execução (Commit) iniciada!");
+          mensagem = pending_swarm_cmd; // Sobrescreve para que a lógica abaixo execute
+          pending_swarm_cmd = ""; // Limpa do buffer
+      } else {
+          return;
+      }
+  }
+
+
 
   // Defensive checks before indexing
   if (mensagem.length() >= 3 && mensagem[0] == 'D' && mensagem[1] == 'N' && mensagem[2] == 'X') {
@@ -130,6 +135,15 @@ void MqttTask::callback(char* topic, byte* payload, unsigned int length) {
           dist = -dist;
         }
         
+      } else if (mensagem[4] == 'S' && mensagem[5] == 'Y') {
+        // Comando SYN (Ex: DNX=SYNC:1712345678) 
+        // Em casos em que os robôs não tenham internet para os servidores NTP
+        if (mensagem[6] == 'N' && mensagem[7] == 'C' && mensagem[8] == ':') {
+          long int ext_time = mensagem.substring(9).toInt();
+          struct timeval tv = { .tv_sec = ext_time, .tv_usec = 0 };
+          settimeofday(&tv, NULL);
+          Serial.printf("[SYNC] Tempo ajustado via MQTT para: %ld\n", ext_time);
+        }
       } else if (mensagem[4] == 'G' && mensagem[5] == 'O') {
         int idx1 = mensagem.indexOf(':', 7);
         int idx2 = mensagem.indexOf(':', idx1 + 1);
@@ -198,39 +212,119 @@ void MqttTask::waitForWifi() {
 void MqttTask::publish(const std::string& topic, const std::string& message) {
   if (client.connected()) {
     client.publish(topic.c_str(), message.c_str());
+
   }
 }
 
-void MqttTask::updateTelemetry() {
-  if (!client.connected()) {
-    return;
-  }
-  // Exemplo de publicação de telemetria
-  String telemetry = "{";
-  telemetry += "\"left_velocity_cms\":" + String(diffCar.left_velocity_cms) + ",";
-  telemetry += "\"right_velocity_cms\":" + String(diffCar.right_velocity_cms) + ",";
-  telemetry += "\"left_vel_target\":" + String(diffCar.left_velocity_target) + ",";
-  telemetry += "\"right_vel_target\":" + String(diffCar.right_velocity_target) + ",";
-  telemetry += "\"x\":" + String(diffCar.odom_real.x/100.0) + ",";
-  telemetry += "\"y\":" + String(diffCar.odom_real.y/100.0) + ",";
-  telemetry += "\"theta\":" + String(diffCar.odom_real.theta) + ",";
-  telemetry += "\"accel_x\":" + String(diffCar.accel_d[0]) + ",";
-  telemetry += "\"accel_y\":" + String(diffCar.accel_d[1]) + ",";
-  telemetry += "\"accel_z\":" + String(diffCar.accel_d[2]) + ",";
-  telemetry += "\"gyro_x\":" + String(diffCar.gyro_d[0]) + ",";
-  telemetry += "\"gyro_y\":" + String(diffCar.gyro_d[1]) + ",";
-  telemetry += "\"gyro_z\":" + String(diffCar.gyro_d[2]) + ",";
-  telemetry += "\"yaw_imu\":" + String(diffCar.ypr_d[0]);
-  telemetry += "}";
-  publish("telemetry", telemetry.c_str());
+void MqttTask::publishOdometry() {
+    if (!client.connected()) return;
 
-  static unsigned long last_param_pub = 0;
-  if (millis() - last_param_pub >= 3000) {
-    last_param_pub = millis();
-    String params = "Kp:" + String(left_pid.GetKp()) + 
-                    " Ki:" + String(left_pid.GetKi()) + 
-                    " Kd:" + String(left_pid.GetKd());
-    publish("/parametros/atuais", params.c_str());
-  }
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    unsigned long long timestamp_ms = (unsigned long long)(tv.tv_sec) * 1000 + (unsigned long long)(tv.tv_usec) / 1000;
+
+    char msg[128];
+
+    snprintf(msg, sizeof(msg),
+        "{\"x\":%.3f,\"y\":%.3f,\"theta\":%.3f,\"t\":%llu}",
+        diffCar.odom_real.x / 100.0f,
+        diffCar.odom_real.y / 100.0f,
+        diffCar.odom_real.theta,
+        timestamp_ms
+    );
+
+    publish((base_topic + "/odom").c_str(), msg);
+}
+
+void MqttTask::publishVelocity() {
+    if (!client.connected()) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    unsigned long long timestamp_ms = (unsigned long long)(tv.tv_sec) * 1000 + (unsigned long long)(tv.tv_usec) / 1000;
+
+    char msg[128];
+
+    snprintf(msg, sizeof(msg),
+        "{\"left\":%.2f,\"right\":%.2f,\"target_l\":%.2f,\"target_r\":%.2f,\"t\":%llu}",
+        diffCar.left_velocity_cms,
+        diffCar.right_velocity_cms,
+        diffCar.left_velocity_target,
+        diffCar.right_velocity_target,
+        timestamp_ms
+    );
+
+    publish((base_topic + "/velocity").c_str(), msg);
+}
+
+void MqttTask::publishIMU() {
+    if (!client.connected()) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    unsigned long long timestamp_ms = (unsigned long long)(tv.tv_sec) * 1000 + (unsigned long long)(tv.tv_usec) / 1000;
+
+    char msg[192];
+
+    snprintf(msg, sizeof(msg),
+        "{\"accel\":[%.3f,%.3f,%.3f],"
+        "\"gyro\":[%.3f,%.3f,%.3f],"
+        "\"yaw\":%.3f,\"t\":%llu}",
+        diffCar.accel_d[0],
+        diffCar.accel_d[1],
+        diffCar.accel_d[2],
+        diffCar.gyro_d[0],
+        diffCar.gyro_d[1],
+        diffCar.gyro_d[2],
+        diffCar.ypr_d[0],
+        timestamp_ms
+    );
+
+    publish((base_topic + "/imu").c_str(), msg);
+}
+
+void MqttTask::publishPID() {
+
+    static unsigned long last = 0;
+    if (millis() - last < 5000) return;
+    last = millis();
+
+    char msg[128];
+
+    snprintf(msg, sizeof(msg),
+        "{\"kp_l\":%.2f,\"ki_l\":%.2f,\"kd_l\":%.2f,"
+        "\"kp_r\":%.2f,\"ki_r\":%.2f,\"kd_r\":%.2f}",
+        left_pid.GetKp(), left_pid.GetKi(), left_pid.GetKd(),
+        right_pid.GetKp(), right_pid.GetKi(), right_pid.GetKd()
+    );
+
+    publish((base_topic + "/pid").c_str(), msg);
+}
+
+void MqttTask::publishDiscovery() {
+
+    static unsigned long last = 0;
+    if (millis() - last < 1000) return;
+    last = millis();
+
+    char msg[64];
+
+    snprintf(msg, sizeof(msg),
+        "{\"id\":\"%s\"}",
+        WiFi.macAddress().c_str()
+    );
+
+    publish((geral_topic + "/robots").c_str(), msg);
+}
+
+void MqttTask::updateTelemetry() {
+
+    if (!client.connected()) return;
+
+    publishOdometry();
+    publishVelocity();
+    publishIMU();
+    publishPID();
+    publishDiscovery();
 }
 

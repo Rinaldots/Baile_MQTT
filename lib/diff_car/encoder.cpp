@@ -107,8 +107,8 @@ void DiffCar::setup_encoder() {
 // Q: quanto a velocidade pode mudar entre amostras (dinâmica do robô)
 // R: ruído do sensor (chave óptica é limpa, mas tem quantização)
 float DiffCar::kalman_update(float measurement, float &x, float &P) {
-    const float Q = 5.0f;   // aceita mudanças rápidas de velocidade
-    const float R = 1500.0f;   // chave óptica tem pouco ruído (R/Q = 3x)
+    const float Q = 50.0f;   // aceita mudanças rápidas de velocidade
+    const float R = 150.0f;   // chave óptica tem pouco ruído (R/Q = 3x)
 
     float P_pred = P + Q;
     float K      = P_pred / (P_pred + R);

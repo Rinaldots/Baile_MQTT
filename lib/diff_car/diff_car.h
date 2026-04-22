@@ -125,6 +125,7 @@ public:
     // Odometry functions
     Odometry odom_enc;
     Odometry odom_real;
+    Odometry odom_referencial;
     
     // roda esquerda
     float left_kalman_x = 0.0f;
