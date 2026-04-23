@@ -232,9 +232,14 @@ def main():
             if topic.startswith("observer/cam"):
                 cam_id = topic.split("/")[-1]
                 t      = data.get("t", int(time.time() * 1000))
-                for det in data.get("detections", []):
+                # Aceita deteccoes YOLO ("robot") e LEDs ("blue")
+                robot_dets = [d for d in data.get("detections", [])
+                              if d.get("color") in ("robot", "blue")]
+                if robot_dets:
+                    # Usa o de maior confianca para calibracao
+                    best = max(robot_dets, key=lambda d: d.get("score", 1.0))
                     collector.add_obs(cam_id, t,
-                                      det["pixel"]["u"], det["pixel"]["v"])
+                                      best["pixel"]["u"], best["pixel"]["v"])
 
             elif topic == "telemetry":
                 t = int(time.time() * 1000)

@@ -20,14 +20,30 @@
     max-width: calc(100vw - 32px);
   }
   #overlay .line { margin: 2px 0; }
-  #overlay .ok  { color: #0f0; }
+  #overlay .ok   { color: #0f0; }
   #overlay .wait { color: #fc0; }
-  #overlay .err { color: #f55; }
+  #overlay .err  { color: #f55; }
+  #controls {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; display: flex; gap: 10px;
+  }
+  #controls button {
+    padding: 12px 20px; border: none; border-radius: 8px;
+    font: bold 14px monospace; cursor: pointer;
+  }
+  #btnMap  { background: #fc0; color: #000; }
+  #btnStop { background: #0f0; color: #000; display: none; }
+  #btnReset{ background: #f55; color: #fff; }
 </style>
 </head>
 <body>
-<video   id="v" autoplay playsinline muted></video>
-<canvas  id="c"></canvas>
+<video  id="v" autoplay playsinline muted></video>
+<canvas id="c"></canvas>
+<div id="controls">
+  <button id="btnMap"  onclick="startMapping()">Iniciar Mapeamento</button>
+  <button id="btnStop" onclick="stopMapping()">Finalizar Mapeamento</button>
+  <button id="btnReset"onclick="resetSlam()">Reset</button>
+</div>
 <div id="overlay">
   <div class="line" id="st">Iniciando...</div>
   <div class="line" id="cal">Calibracao: aguardando BA...</div>
@@ -37,25 +53,39 @@
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
 // --- Config --------------------------------------------------------------
-const CAM_ID   = new URLSearchParams(location.search).get('cam') || '0';
-const MQTT_URL = 'ws://10.0.0.134:9001';
+let CAM_ID = new URLSearchParams(location.search).get('cam');
+if (!CAM_ID) {
+  CAM_ID = localStorage.getItem('cam_id');
+  if (!CAM_ID) {
+    CAM_ID = Math.floor(Math.random() * 10000).toString();
+    localStorage.setItem('cam_id', CAM_ID);
+  }
+}
 
-let H = null;  // homografia 3x3 vinda do bundle_adjustment.py
+const MQTT_URL  = 'ws://10.0.0.134:9001';
+const WS_URL    = `wss://${location.hostname}:8765`;
+const SEND_W    = 640;
+const SEND_H    = 360;
+const SEND_FPS  = 10;  // frames enviados ao servidor por segundo
 
-// --- MQTT ----------------------------------------------------------------
-const client = mqtt.connect(MQTT_URL, {
+let H       = null;
+let lastDet = null;
+let ws      = null;
+
+// --- MQTT (so para receber calibracao) -----------------------------------
+const mqttClient = mqtt.connect(MQTT_URL, {
   clientId: `obs_${CAM_ID}_${Date.now()}`,
   reconnectPeriod: 2000,
 });
 
-client.on('connect', () => {
+mqttClient.on('connect', () => {
   setStatus(`cam${CAM_ID} conectada`, 'ok');
-  client.subscribe(`cam/calibration/${CAM_ID}`);
+  mqttClient.subscribe(`cam/calibration/${CAM_ID}`);
 });
 
-client.on('error', e => setStatus(`MQTT erro: ${e.message}`, 'err'));
+mqttClient.on('error', e => setStatus(`MQTT erro: ${e.message}`, 'err'));
 
-client.on('message', (topic, msg) => {
+mqttClient.on('message', (topic, msg) => {
   if (topic !== `cam/calibration/${CAM_ID}`) return;
   try {
     const d = JSON.parse(msg.toString());
@@ -64,14 +94,73 @@ client.on('message', (topic, msg) => {
     const rmse = d.rmse != null ? d.rmse.toFixed(1) : '?';
     setCal(`Calibracao BA ativa (RMSE=${rmse}cm)`, 'ok');
   } catch (e) {
-    setCal(`Erro parse calibracao: ${e.message}`, 'err');
+    setCal(`Erro calibracao: ${e.message}`, 'err');
   }
 });
 
+// --- WebSocket para o servidor de inferencia -----------------------------
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen  = () => setStatus(`cam${CAM_ID} — conectado`, 'ok');
+  ws.onclose = () => {
+    setStatus('Servidor desconectado, reconectando...', 'wait');
+    setTimeout(connectWS, 2000);
+  };
+  ws.onerror = () => setStatus('Erro WebSocket', 'err');
+
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+
+    // Mensagens de estado do SLAM
+    if (data.status) {
+      if (data.status === 'mapping') {
+        setStatus(`Mapeando... ${data.frames}/${data.target || '?'} frames`, 'wait');
+        document.getElementById('btnMap').style.display  = 'none';
+        document.getElementById('btnStop').style.display = 'inline-block';
+      } else if (data.status === 'processing') {
+        setStatus(`MASt3R processando ${data.frames} frames...`, 'wait');
+        document.getElementById('btnStop').style.display = 'none';
+      } else if (data.status === 'tracking') {
+        setStatus(`Tracking ativo (${data.landmarks} landmarks)`, 'ok');
+        document.getElementById('btnMap').style.display  = 'inline-block';
+      } else if (data.status === 'idle') {
+        setStatus('Pronto para mapear', 'wait');
+        document.getElementById('btnMap').style.display  = 'inline-block';
+        document.getElementById('btnStop').style.display = 'none';
+      } else if (data.status === 'error') {
+        setStatus(`Erro: ${data.msg}`, 'err');
+        document.getElementById('btnMap').style.display  = 'inline-block';
+        document.getElementById('btnStop').style.display = 'none';
+      }
+      return;
+    }
+
+    // Frame com deteccoes
+    if (!data.detections || data.detections.length === 0) {
+      lastDet = null;
+      return;
+    }
+    // Converte bbox_send -> coordenadas do canvas (full-res)
+    const sx = video.videoWidth  / SEND_W;
+    const sy = video.videoHeight / SEND_H;
+    lastDet = data.detections.map(d => {
+      const [x1, y1, x2, y2] = d.bbox_send;
+      return {
+        cx:    (x1 + x2) / 2 * sx,
+        cy:    (y1 + y2) / 2 * sy,
+        w:     (x2 - x1) * sx,
+        h:     (y2 - y1) * sy,
+        score: d.score,
+        world: d.world || null,
+      };
+    });
+  };
+}
+
 // --- Camera --------------------------------------------------------------
-const video  = document.getElementById('v');
+const video = document.getElementById('v');
 const canvas = document.getElementById('c');
-const ctx    = canvas.getContext('2d', { willReadFrequently: true });
+const ctx   = canvas.getContext('2d');
 
 navigator.mediaDevices.getUserMedia({
   video: {
@@ -85,86 +174,40 @@ navigator.mediaDevices.getUserMedia({
   video.onloadedmetadata = () => {
     canvas.width  = video.videoWidth;
     canvas.height = video.videoHeight;
+    connectWS();
+    setInterval(sendFrame, 1000 / SEND_FPS);
     requestAnimationFrame(loop);
   };
 }).catch(err => setStatus(`Camera: ${err.message}`, 'err'));
 
-// --- Loop ----------------------------------------------------------------
+// --- Envio de frames -----------------------------------------------------
+const prepCanvas = document.createElement('canvas');
+prepCanvas.width  = SEND_W;
+prepCanvas.height = SEND_H;
+const prepCtx = prepCanvas.getContext('2d');
+
+function sendFrame() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  prepCtx.drawImage(video, 0, 0, SEND_W, SEND_H);
+  const b64 = prepCanvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+  ws.send(JSON.stringify({
+    cam    : CAM_ID,
+    img    : b64,
+    video_w: video.videoWidth,
+    video_h: video.videoHeight,
+  }));
+}
+
+// --- Loop de render ------------------------------------------------------
 function loop() {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-  const img   = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const blobs = detectLEDs(img);
-
-  if (blobs.length) {
-    const detections = blobs.map(b => {
-      const det = {
-        pixel: { u: b.cx, v: b.cy },
-        area:  b.area,
-        color: b.color,
-      };
-      if (H) det.world = applyH(H, b.cx, b.cy);
-      return det;
-    });
-
-    client.publish(`observer/cam${CAM_ID}`, JSON.stringify({
-      cam: CAM_ID, t: Date.now(), detections,
-    }));
-
-    draw(blobs);
-    updateDetInfo(detections);
+  if (lastDet && lastDet.length > 0) {
+    lastDet.forEach((det, i) => drawDetection(det, i));
+    updateDetInfo(lastDet);
   } else {
     document.getElementById('det').textContent = '';
   }
-
   requestAnimationFrame(loop);
-}
-
-// --- Deteccao de LEDs ----------------------------------------------------
-function detectLEDs(img) {
-  const { data, width, height } = img;
-  const mask = new Uint8Array(width * height);
-  const blobs = [];
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      if (mask[idx]) continue;
-      const i = idx * 4;
-      const color = classify(data[i], data[i + 1], data[i + 2]);
-      if (!color) continue;
-      const b = bfs(data, width, height, mask, x, y, color);
-      if (b.area > 8) blobs.push(b);
-    }
-  }
-  return blobs;
-}
-
-function classify(r, g, b) {
-  const mx = Math.max(r, g, b);
-  if (mx < 180) return null;
-  if (r > 1.8 * g && r > 1.8 * b) return 'red';
-  if (g > 1.8 * r && g > 1.8 * b) return 'green';
-  if (b > 1.8 * r && b > 1.8 * g) return 'blue';
-  if (mx - Math.min(r, g, b) < 30) return 'white';
-  return null;
-}
-
-function bfs(data, w, h, mask, sx, sy, color) {
-  const stack = [[sx, sy]];
-  let sumX = 0, sumY = 0, area = 0;
-  while (stack.length) {
-    const [x, y] = stack.pop();
-    if (x < 0 || x >= w || y < 0 || y >= h) continue;
-    const idx = y * w + x;
-    if (mask[idx]) continue;
-    const i = idx * 4;
-    if (classify(data[i], data[i + 1], data[i + 2]) !== color) continue;
-    mask[idx] = 1;
-    sumX += x; sumY += y; area++;
-    stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
-  }
-  return { cx: sumX / area, cy: sumY / area, area, color };
 }
 
 // --- Homografia ----------------------------------------------------------
@@ -185,29 +228,61 @@ function reshape(flat) {
 }
 
 // --- UI ------------------------------------------------------------------
-function draw(blobs) {
-  ctx.lineWidth = 3;
-  blobs.forEach(b => {
-    ctx.strokeStyle = b.color === 'white' ? '#fff' : b.color;
-    ctx.beginPath();
-    ctx.arc(b.cx, b.cy, 14, 0, 2 * Math.PI);
-    ctx.stroke();
-  });
+const COLORS = ['#0f0', '#0ff', '#ff0', '#f80'];
+
+function drawDetection(det, idx) {
+  const color = COLORS[idx % COLORS.length];
+  const x = det.cx - det.w / 2;
+  const y = det.cy - det.h / 2;
+
+  ctx.lineWidth   = 3;
+  ctx.strokeStyle = color;
+  ctx.strokeRect(x, y, det.w, det.h);
+
+  // Label com ID
+  ctx.fillStyle = color;
+  ctx.font      = 'bold 14px monospace';
+  ctx.fillText(`R${idx}`, x + 4, y - 4);
+
+  ctx.beginPath();
+  ctx.arc(det.cx, det.cy, 5, 0, 2 * Math.PI);
+  ctx.fill();
 }
 
 function updateDetInfo(dets) {
-  document.getElementById('det').textContent = dets.map(d => {
+  const lines = dets.map((d, i) => {
+    const conf = (d.score * 100).toFixed(0);
     if (d.world) {
-      return `${d.color}: (${d.world.x.toFixed(0)}, ${d.world.y.toFixed(0)}) cm`;
+      return `R${i}: (${d.world.x.toFixed(0)}, ${d.world.y.toFixed(0)}, ${d.world.z.toFixed(0)}) cm  ${conf}%`;
     }
-    return `${d.color}: px(${d.pixel.u.toFixed(0)}, ${d.pixel.v.toFixed(0)})`;
-  }).join(' | ');
+    return `R${i}: px(${d.cx.toFixed(0)}, ${d.cy.toFixed(0)})  ${conf}%`;
+  });
+  document.getElementById('det').textContent = lines.join(' | ');
 }
 
 function setStatus(msg, cls) {
   const el = document.getElementById('st');
   el.textContent = msg;
   el.className = 'line ' + (cls || '');
+}
+
+// --- Controles SLAM -------------------------------------------------------
+function startMapping() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ cmd: 'start_mapping' }));
+}
+
+function stopMapping() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ cmd: 'stop_mapping' }));
+}
+
+function resetSlam() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ cmd: 'reset' }));
+  lastDet = null;
+  document.getElementById('btnMap').style.display  = 'inline-block';
+  document.getElementById('btnStop').style.display = 'none';
 }
 
 function setCal(msg, cls) {
